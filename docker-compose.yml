@@ -1,0 +1,104 @@
+# BioClaw Phase 0 — Conductor + 2 specialists.
+#
+# Bring up:    docker compose up -d
+# Logs (all):  docker compose logs -f
+# Logs (one):  docker compose logs -f conductor
+# Tear down:   docker compose down            (keeps memory volumes)
+# Reset:       docker compose down -v         (also wipes memory)
+#
+# Required env (read from .env file, written by scripts/bioclaw-up):
+#   ANTHROPIC_API_KEY / OPENAI_API_KEY / ASI_API_KEY / ASIONE_API_KEY
+#       — only the one matching LLM_PROVIDER needs to be set; the rest
+#         default to empty and are ignored.
+#   LLM_PROVIDER     ASIOne | Anthropic | OpenAI | ASICloud
+#   EMBED_PROVIDER   Local | OpenAI
+#   TG_BOT_TOKEN     conductor's telegram bot token
+#   AUTH_SECRET      conductor's auth secret
+
+x-common-env: &common-env
+  OMEGACLAW_AUTH_SECRET: ${AUTH_SECRET}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  ASI_API_KEY: ${ASI_API_KEY:-}
+  ASIONE_API_KEY: ${ASIONE_API_KEY:-}
+
+services:
+  conductor:
+    image: bioclaw:phase0
+    build:
+      context: .
+    container_name: bioclaw-conductor
+    init: true
+    tty: true
+    stdin_open: true
+    restart: unless-stopped
+    depends_on:
+      - query-oc
+      - annotation-oc
+    environment:
+      <<: *common-env
+      BIOCLAW_PEERS: "query=http://query-oc:8080,annotation=http://annotation-oc:8080"
+      BIOCLAW_PROMPT: "conductor"
+    command:
+      - "commchannel=telegram"
+      - "provider=${LLM_PROVIDER}"
+      - "embeddingprovider=${EMBED_PROVIDER}"
+      - "TG_BOT_TOKEN=${TG_BOT_TOKEN}"
+      - "TG_POLL_TIMEOUT=20"
+    volumes:
+      - conductor-memory:/PeTTa/repos/OmegaClaw-Core/memory
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /run:size=16m,mode=755
+      - /var/tmp:size=64m,mode=1777
+
+  query-oc:
+    image: bioclaw:phase0
+    container_name: bioclaw-query-oc
+    init: true
+    tty: true
+    stdin_open: true
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      BIOCLAW_PROMPT: "specialist"
+    command:
+      - "commchannel=internal-rpc"
+      - "provider=${LLM_PROVIDER}"
+      - "embeddingprovider=${EMBED_PROVIDER}"
+      - "RPC_ROLE=query"
+      - "RPC_PORT=8080"
+    volumes:
+      - query-memory:/PeTTa/repos/OmegaClaw-Core/memory
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /run:size=16m,mode=755
+      - /var/tmp:size=64m,mode=1777
+
+  annotation-oc:
+    image: bioclaw:phase0
+    container_name: bioclaw-annotation-oc
+    init: true
+    tty: true
+    stdin_open: true
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      BIOCLAW_PROMPT: "specialist"
+    command:
+      - "commchannel=internal-rpc"
+      - "provider=${LLM_PROVIDER}"
+      - "embeddingprovider=${EMBED_PROVIDER}"
+      - "RPC_ROLE=annotation"
+      - "RPC_PORT=8080"
+    volumes:
+      - annotation-memory:/PeTTa/repos/OmegaClaw-Core/memory
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /run:size=16m,mode=755
+      - /var/tmp:size=64m,mode=1777
+
+volumes:
+  conductor-memory:
+  query-memory:
+  annotation-memory:
