@@ -51,6 +51,9 @@ services:
       - "commchannel=${COMMCHANNEL:-telegram}"
       - "provider=${LLM_PROVIDER}"
       - "embeddingprovider=${EMBED_PROVIDER}"
+      # Cap the prompt-history tail to reduce context bloat on weaker LLMs.
+      - "maxHistory=${CONDUCTOR_MAX_HISTORY:-5000}"
+      - "maxFeedback=${CONDUCTOR_MAX_FEEDBACK:-8000}"
       # Telegram args (used when COMMCHANNEL=telegram, which is the default)
       - "TG_BOT_TOKEN=${TG_BOT_TOKEN:-}"
       - "TG_POLL_TIMEOUT=20"
@@ -80,6 +83,8 @@ services:
       - "commchannel=internal-rpc"
       - "provider=${LLM_PROVIDER}"
       - "embeddingprovider=${EMBED_PROVIDER}"
+      - "maxHistory=${SPECIALIST_MAX_HISTORY:-3000}"
+      - "maxFeedback=${SPECIALIST_MAX_FEEDBACK:-5000}"
       - "RPC_ROLE=query"
       - "RPC_PORT=8080"
     volumes:
@@ -103,6 +108,8 @@ services:
       - "commchannel=internal-rpc"
       - "provider=${LLM_PROVIDER}"
       - "embeddingprovider=${EMBED_PROVIDER}"
+      - "maxHistory=${SPECIALIST_MAX_HISTORY:-3000}"
+      - "maxFeedback=${SPECIALIST_MAX_FEEDBACK:-5000}"
       - "RPC_ROLE=annotation"
       - "RPC_PORT=8080"
     volumes:
