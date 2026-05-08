@@ -48,11 +48,17 @@ services:
       BIOCLAW_PEERS: "query=http://query-oc:8080,annotation=http://annotation-oc:8080"
       BIOCLAW_PROMPT: "conductor"
     command:
-      - "commchannel=telegram"
+      - "commchannel=${COMMCHANNEL:-telegram}"
       - "provider=${LLM_PROVIDER}"
       - "embeddingprovider=${EMBED_PROVIDER}"
-      - "TG_BOT_TOKEN=${TG_BOT_TOKEN}"
+      # Telegram args (used when COMMCHANNEL=telegram, which is the default)
+      - "TG_BOT_TOKEN=${TG_BOT_TOKEN:-}"
       - "TG_POLL_TIMEOUT=20"
+      # IRC args (used when COMMCHANNEL=irc)
+      - "IRC_channel=${IRC_CHANNEL:-##omegaclaw}"
+      - "IRC_server=${IRC_SERVER:-irc.quakenet.org}"
+      - "IRC_port=${IRC_PORT:-6667}"
+      - "IRC_user=${IRC_USER:-bioclaw}"
     volumes:
       - conductor-memory:/PeTTa/repos/OmegaClaw-Core/memory
     tmpfs:

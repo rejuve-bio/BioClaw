@@ -93,12 +93,23 @@ class Neo4jBackend:
         self._database = database
 
         # Property names that might hold an entity's human-readable label.
-        # Multiple BioCypher writer configs exist; probe several to be schema-agnostic.
+        # Defaults match the BioCypher human-schema entity types we use:
+        #   gene → gene_name; protein → protein_name; transcript → transcript_name;
+        #   pathway → pathway_name; GO terms / disease → term_name (inherits from
+        #   "ontology term"); fallback → id.
+        # Override by setting BIOKG_NAME_PROPERTIES=foo,bar in the env.
         env_props = os.environ.get("BIOKG_NAME_PROPERTIES", "").strip()
         if env_props:
             self._name_props = [p.strip() for p in env_props.split(",") if p.strip()]
         else:
-            self._name_props = ["symbol", "gene_name", "name", "label", "id", "preferred_label"]
+            self._name_props = [
+                "gene_name",
+                "protein_name",
+                "transcript_name",
+                "pathway_name",
+                "term_name",
+                "id",
+            ]
 
     @classmethod
     def from_env(cls):
@@ -111,20 +122,22 @@ class Neo4jBackend:
         return cls(uri, user, pwd, db)
 
     def lookup(self, name: str) -> str:
-        # Build an OR over the candidate properties so we don't need to know
-        # the exact schema upfront. Then optional-match all neighbors with
-        # their own labels to produce a flat connectivity summary.
-        prop_clauses = " OR ".join(f"toLower(n.{p}) = toLower($name)" for p in self._name_props)
+        # Match the entity on any of the candidate name properties. Then resolve
+        # each connected neighbor's display name via the same coalesce so we
+        # don't return opaque IDs for GO terms / pathways / proteins.
+        match_clauses = " OR ".join(f"toLower(n.{p}) = toLower($name)" for p in self._name_props)
+        coalesce_n = "coalesce(" + ", ".join(f"n.{p}" for p in self._name_props) + ")"
+        coalesce_m = "coalesce(" + ", ".join(f"m.{p}" for p in self._name_props) + ")"
         cypher = (
-            f"MATCH (n) WHERE {prop_clauses} "
+            f"MATCH (n) WHERE {match_clauses} "
             "WITH n LIMIT 5 "
             "OPTIONAL MATCH (n)-[r]-(m) "
-            "RETURN labels(n) AS n_labels, "
-            "       properties(n) AS n_props, "
+            f"RETURN labels(n) AS n_labels, "
+            f"       {coalesce_n} AS n_name, "
             "       type(r) AS rel, "
-            "       startNode(r).id = n.id AS outgoing, "
+            "       startNode(r) = n AS outgoing, "
             "       labels(m) AS m_labels, "
-            "       properties(m) AS m_props "
+            f"       {coalesce_m} AS m_name "
             "LIMIT 200"
         )
         try:
@@ -156,11 +169,10 @@ class Neo4jBackend:
         return f"{len(rows)} row(s){more}:\n" + "\n".join(out_rows)
 
     def _format_lookup(self, name: str, rows: list) -> str:
-        # Group rows by the central entity, then list its connections.
+        # Display names come from server-side coalesce; we just format here.
         first = rows[0]
         n_labels = first["n_labels"] or []
-        n_props = first["n_props"] or {}
-        primary = _short(_pick(n_props, self._name_props, default=name))
+        primary = _short(first.get("n_name") or name)
         kind = ",".join(n_labels) if n_labels else "?"
 
         connections = []
@@ -169,8 +181,7 @@ class Neo4jBackend:
             if not rel:
                 continue
             m_labels = r.get("m_labels") or []
-            m_props = r.get("m_props") or {}
-            m_name = _short(_pick(m_props, self._name_props, default="?"))
+            m_name = _short(r.get("m_name") or "?")
             m_kind = ",".join(m_labels) if m_labels else "?"
             arrow = "->" if r.get("outgoing") else "<-"
             connections.append(f"  {arrow}[{rel}]{arrow[-1]} {m_name} ({m_kind})")
