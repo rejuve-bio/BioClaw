@@ -21,6 +21,14 @@ x-common-env: &common-env
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
   ASI_API_KEY: ${ASI_API_KEY:-}
   ASIONE_API_KEY: ${ASIONE_API_KEY:-}
+  # BioKG backend selection. Defaults to disabled until URI/password are set.
+  BIOKG_BACKEND: ${BIOKG_BACKEND:-disabled}
+  NEO4J_URI: ${NEO4J_URI:-}
+  NEO4J_USER: ${NEO4J_USER:-neo4j}
+  NEO4J_PASSWORD: ${NEO4J_PASSWORD:-}
+  NEO4J_DATABASE: ${NEO4J_DATABASE:-neo4j}
+  BIOKG_NAME_PROPERTIES: ${BIOKG_NAME_PROPERTIES:-}
+  MORK_URI: ${MORK_URI:-}
 
 services:
   conductor:

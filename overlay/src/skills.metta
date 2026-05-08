@@ -23,6 +23,14 @@
     "  When you see that result, your NEXT action MUST be: send <text>"
     "  Example call:    ask-agent annotation|Annotate gene TP53 with function tumor suppressor"
     "  Example follow-up: send Annotation: TP53 acts as a tumor suppressor by ..."
+    ;BIO KNOWLEDGE GRAPH:
+    "- Look up a biological entity by name in the BioKG. Single argument: biokg-lookup NAME"
+    "  Returns a connectivity summary (labels + connected entities) or a 'not found' message."
+    "  Use this BEFORE answering a biology question about a specific gene/protein/pathway/disease."
+    "  Example: biokg-lookup TP53"
+    "- Run a raw query against the BioKG (Cypher when backend is Neo4j). Single argument: biokg-query QUERY_STRING"
+    "  Use only when biokg-lookup is insufficient (e.g. multi-hop traversal)."
+    "  Example: biokg-query MATCH (g:gene)-[:is_implicated_in]->(d:disease {name:'breast cancer'}) RETURN g.symbol LIMIT 10"
     ;CODE EXECUTION:
     "- Execute MeTTa expression: metta sexpression"
     "Example to invoke Non-Axiomatic Logic via MeTTa: "
@@ -68,6 +76,12 @@
 
 (= (ask-agent $combined)
    (py-call (peers.ask_pipe $combined)))
+
+(= (biokg-lookup $name)
+   (py-call (biokg.lookup $name)))
+
+(= (biokg-query $q)
+   (py-call (biokg.query $q)))
 
 !(import_prolog_functions_from_file (library OmegaClaw-Core ./src/skills.pl) (shell first_char))
 
