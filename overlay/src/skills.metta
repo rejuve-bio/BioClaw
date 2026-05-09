@@ -23,7 +23,7 @@
     "  When you see that result, your NEXT action MUST be: send <text>"
     "  Example call:    ask-agent annotation|Annotate gene TP53 with function tumor suppressor"
     "  Example follow-up: send Annotation: TP53 acts as a tumor suppressor by ..."
-    ;BIO KNOWLEDGE GRAPH:
+    ;BIO KNOWLEDGE GRAPH (read):
     "- Look up a biological entity by name in the BioKG. Single argument: biokg-lookup NAME"
     "  Returns a connectivity summary (labels + connected entities) or a 'not found' message."
     "  Use this BEFORE answering a biology question about a specific gene/protein/pathway/disease."
@@ -31,6 +31,15 @@
     "- Run a raw query against the BioKG (Cypher when backend is Neo4j). Single argument: biokg-query QUERY_STRING"
     "  Use only when biokg-lookup is insufficient (e.g. multi-hop traversal)."
     "  Example: biokg-query MATCH (g:gene)-[:is_implicated_in]->(d:disease {name:'breast cancer'}) RETURN g.symbol LIMIT 10"
+    ;BIO KNOWLEDGE GRAPH (write — staging + human approval):
+    "- Propose a NEW edge into the BioKG staging area. Format: biokg-stage SOURCE|EDGE_TYPE|TARGET|EVIDENCE"
+    "  Pipe-separated single argument. SOURCE and TARGET must already exist in BioKG. EVIDENCE is a brief justification."
+    "  Returns a line starting with [STAGED edge <id>]. The proposal is NOT in BioKG yet — it must be approved by a human first."
+    "  Example: biokg-stage TP53|enables|nucleic acid binding|inferred from KG lookup"
+    "- List all pending proposals: biokg-list-staging (no argument)"
+    "- Promote a proposal into the BioKG (Conductor only, AFTER human approval): biokg-promote STAGING_ID"
+    "  Example: biokg-promote a1b2c3d4"
+    "- Reject and discard a proposal: biokg-reject STAGING_ID"
     ;CODE EXECUTION:
     "- Execute MeTTa expression: metta sexpression"
     "Example to invoke Non-Axiomatic Logic via MeTTa: "
@@ -82,6 +91,18 @@
 
 (= (biokg-query $q)
    (py-call (biokg.query $q)))
+
+(= (biokg-stage $combined)
+   (py-call (biokg.stage_pipe $combined)))
+
+(= (biokg-list-staging)
+   (py-call (biokg.list_staging)))
+
+(= (biokg-promote $sid)
+   (py-call (biokg.promote $sid)))
+
+(= (biokg-reject $sid)
+   (py-call (biokg.reject $sid)))
 
 !(import_prolog_functions_from_file (library OmegaClaw-Core ./src/skills.pl) (shell first_char))
 
