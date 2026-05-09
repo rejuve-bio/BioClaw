@@ -18,20 +18,38 @@ out of the box. Override via BIOKG_NAME_PROPERTIES if needed.
 """
 import os
 import threading
+import time
 from typing import Any
 
 _lock = threading.Lock()
 _backend = None  # lazily constructed singleton
 
+# Lookup cache — entity name → (timestamp, formatted_result).
+# TTL via BIOKG_CACHE_TTL env (seconds, default 300). Set 0 to disable.
+_cache: dict = {}
+_cache_lock = threading.Lock()
+
 
 # ─── public skill-facing API ────────────────────────────────────────────────
 
 def lookup(name: str) -> str:
-    """Look up everything we know about a named entity. Returns LLM-readable text."""
+    """Look up everything we know about a named entity. Returns LLM-readable text.
+    Caches the result by lowercased name for BIOKG_CACHE_TTL seconds (default 300)."""
     name = str(name).strip().strip('"').strip("'").strip()
     if not name:
         return "error: biokg-lookup requires a non-empty name"
-    return _get_backend().lookup(name)
+    ttl = float(os.environ.get("BIOKG_CACHE_TTL", "300"))
+    key = name.lower()
+    if ttl > 0:
+        with _cache_lock:
+            cached = _cache.get(key)
+        if cached and (time.time() - cached[0]) < ttl:
+            return cached[1] + "\n(cached)"
+    result = _get_backend().lookup(name)
+    if ttl > 0 and not result.startswith(("error:", "biokg unavailable", "biokg neo4j error")):
+        with _cache_lock:
+            _cache[key] = (time.time(), result)
+    return result
 
 
 def query(query_string: str) -> str:
@@ -125,12 +143,14 @@ class Neo4jBackend:
         # Match the entity on any of the candidate name properties. Then resolve
         # each connected neighbor's display name via the same coalesce so we
         # don't return opaque IDs for GO terms / pathways / proteins.
+        # LIMIT 20 keeps the LLM's context tight; raise via env BIOKG_MAX_CONNECTIONS.
+        max_conn = int(os.environ.get("BIOKG_MAX_CONNECTIONS", "20"))
         match_clauses = " OR ".join(f"toLower(n.{p}) = toLower($name)" for p in self._name_props)
         coalesce_n = "coalesce(" + ", ".join(f"n.{p}" for p in self._name_props) + ")"
         coalesce_m = "coalesce(" + ", ".join(f"m.{p}" for p in self._name_props) + ")"
         cypher = (
             f"MATCH (n) WHERE {match_clauses} "
-            "WITH n LIMIT 5 "
+            "WITH n LIMIT 1 "
             "OPTIONAL MATCH (n)-[r]-(m) "
             f"RETURN labels(n) AS n_labels, "
             f"       {coalesce_n} AS n_name, "
@@ -138,7 +158,7 @@ class Neo4jBackend:
             "       startNode(r) = n AS outgoing, "
             "       labels(m) AS m_labels, "
             f"       {coalesce_m} AS m_name "
-            "LIMIT 200"
+            f"LIMIT {max_conn}"
         )
         try:
             with self._driver.session(database=self._database) as session:
