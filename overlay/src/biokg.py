@@ -83,8 +83,9 @@ def stage_pipe(combined: str, agent: str = "specialist") -> str:
 
 
 def list_staging() -> str:
-    """List all pending staged proposals."""
-    return _get_backend().list_staging()
+    """List pending staged proposals (cap via BIOKG_STAGING_LIMIT, default 5)."""
+    limit = int(os.environ.get("BIOKG_STAGING_LIMIT", "5"))
+    return _get_backend().list_staging(limit=limit)
 
 
 def promote(staging_id: str) -> str:
