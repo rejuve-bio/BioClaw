@@ -188,10 +188,17 @@ class Schema:
     # ─── public introspection helpers ─────────────────────────────────────
 
     def name_properties(self) -> list:
-        """Union of all distinct name properties in the schema, plus id."""
-        props = {info["name_prop"] for info in self.entities.values()}
-        props.add("id")
-        return sorted(props)
+        """Union of all distinct name properties from the schema, with `id`
+        as the final fallback. Order matters: coalesce() returns the first
+        non-null, so entity-specific names like gene_name / term_name must
+        come BEFORE the generic id."""
+        seen = []
+        for info in self.entities.values():
+            p = info["name_prop"]
+            if p and p != "id" and p not in seen:
+                seen.append(p)
+        seen.append("id")
+        return seen
 
     def entity_name_prop(self, label: str) -> Optional[str]:
         info = self.entities.get(label)
@@ -437,8 +444,8 @@ class Neo4jBackend:
         find_cypher = (
             f"MATCH (s) WHERE {src_clauses} WITH s LIMIT 1 "
             f"MATCH (t) WHERE {tgt_clauses} WITH s, t LIMIT 1 "
-            f"RETURN id(s) AS s_id, labels(s)[0] AS s_label, {coalesce_s} AS s_name, "
-            f"       id(t) AS t_id, labels(t)[0] AS t_label, {coalesce_t} AS t_name"
+            f"RETURN elementId(s) AS s_id, labels(s)[0] AS s_label, {coalesce_s} AS s_name, "
+            f"       elementId(t) AS t_id, labels(t)[0] AS t_label, {coalesce_t} AS t_name"
         )
         try:
             with self._driver.session(database=self._database) as session:
@@ -466,7 +473,7 @@ class Neo4jBackend:
         # Endpoints valid; create the staged edge.
         sid = uuid.uuid4().hex[:8]
         create_cypher = (
-            "MATCH (s) WHERE id(s) = $s_id MATCH (t) WHERE id(t) = $t_id "
+            "MATCH (s) WHERE elementId(s) = $s_id MATCH (t) WHERE elementId(t) = $t_id "
             f"CREATE (s)-[r:`{safe_edge_type}` {{"
             "  _staging_id: $sid,"
             "  _staged_by: $agent,"
