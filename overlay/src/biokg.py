@@ -26,7 +26,7 @@ import os
 import threading
 import time
 import uuid
-from typing import Any
+from typing import Any, Optional
 
 _lock = threading.Lock()
 _backend = None  # lazily constructed singleton
@@ -104,6 +104,169 @@ def reject(staging_id: str) -> str:
     return _get_backend().reject(sid)
 
 
+def describe_schema() -> str:
+    """Return a human/LLM-readable summary of the loaded schema (entities + edges)."""
+    return _get_backend().describe_schema()
+
+
+# ─── BioCypher schema loader ────────────────────────────────────────────────
+# Parses a BioCypher schema_config.yaml (full or curated subset) and exposes:
+#   entities[label] = { name_prop, all_labels (incl. inherited) }
+#   edges[input_label or output_label] = { sources: [labels], targets: [labels] }
+
+class Schema:
+    DEFAULT_PATH = "/opt/bioclaw/config/schema.yaml"
+
+    def __init__(self, entries: dict):
+        # entries: raw dict from yaml.safe_load (BioCypher format)
+        self._raw = entries
+        # Pre-compute node label -> name property (resolves is_a inheritance)
+        self.entities: dict = {}   # neo4j_label -> {"name_prop": str, "entity_name": str}
+        self.edges: dict = {}      # edge_label (Neo4j relationship type) -> {"sources": [labels], "targets": [labels], "entity_name": str}
+        self._build()
+
+    def _build(self):
+        # First pass: name-property lookup, including walking is_a chains.
+        for name, body in self._raw.items():
+            if not isinstance(body, dict):
+                continue
+            represented = body.get("represented_as")
+            if represented == "node":
+                label = body.get("input_label", name).strip()
+                name_prop = self._resolve_name_property(name)
+                self.entities[label] = {
+                    "name_prop": name_prop,
+                    "entity_name": name,
+                }
+            elif represented == "edge":
+                # output_label wins over input_label for Neo4j relationship type.
+                rel = body.get("output_label") or body.get("input_label") or name
+                sources = body.get("source")
+                targets = body.get("target")
+                if sources is None or targets is None:
+                    continue
+                self.edges[str(rel).strip()] = {
+                    "sources": [self._entity_label(s) for s in _aslist(sources)],
+                    "targets": [self._entity_label(t) for t in _aslist(targets)],
+                    "entity_name": name,
+                }
+
+    def _resolve_name_property(self, entity_name: str, _seen=None) -> str:
+        """Walk is_a chain to find the property annotated `biolink: name`."""
+        if _seen is None:
+            _seen = set()
+        if entity_name in _seen:
+            return "id"
+        _seen.add(entity_name)
+
+        body = self._raw.get(entity_name)
+        if not isinstance(body, dict):
+            return "id"
+
+        props = body.get("properties") or {}
+        for prop_name, prop_body in props.items():
+            if isinstance(prop_body, dict) and prop_body.get("biolink") == "name":
+                return prop_name
+
+        # Inherit from parent if requested
+        if body.get("inherit_properties"):
+            parents = body.get("is_a")
+            for parent in _aslist(parents):
+                resolved = self._resolve_name_property(parent, _seen)
+                if resolved != "id":
+                    return resolved
+        return "id"
+
+    def _entity_label(self, entity_name: str) -> str:
+        """Convert an `is_a` / `source` / `target` entity-name into a Neo4j label
+        (uses input_label if present)."""
+        body = self._raw.get(entity_name)
+        if isinstance(body, dict):
+            return str(body.get("input_label", entity_name)).strip()
+        return str(entity_name).strip()
+
+    # ─── public introspection helpers ─────────────────────────────────────
+
+    def name_properties(self) -> list:
+        """Union of all distinct name properties in the schema, plus id."""
+        props = {info["name_prop"] for info in self.entities.values()}
+        props.add("id")
+        return sorted(props)
+
+    def entity_name_prop(self, label: str) -> Optional[str]:
+        info = self.entities.get(label)
+        return info["name_prop"] if info else None
+
+    def validate_edge(self, edge_label: str, source_label: str, target_label: str):
+        """Return (ok: bool, reason: str)."""
+        edge = self.edges.get(edge_label)
+        if edge is None:
+            return False, (f"edge type {edge_label!r} is not in the loaded schema. "
+                           f"Known edges: {', '.join(sorted(self.edges)) or '(none)'}")
+        if source_label not in edge["sources"]:
+            return False, (f"edge {edge_label!r} expects source type in "
+                           f"{edge['sources']} but got {source_label!r}")
+        if target_label not in edge["targets"]:
+            return False, (f"edge {edge_label!r} expects target type in "
+                           f"{edge['targets']} but got {target_label!r}")
+        return True, "ok"
+
+    def summary(self) -> str:
+        lines = [f"Loaded BioKG schema — {len(self.entities)} entity types, {len(self.edges)} edge types."]
+        lines.append("Entities (label : name property):")
+        for label in sorted(self.entities):
+            lines.append(f"  {label} : {self.entities[label]['name_prop']}")
+        lines.append("Edges (label : source(s) -> target(s)):")
+        for label in sorted(self.edges):
+            e = self.edges[label]
+            lines.append(f"  {label} : {','.join(e['sources'])} -> {','.join(e['targets'])}")
+        return "\n".join(lines)
+
+
+def _aslist(x):
+    if x is None:
+        return []
+    if isinstance(x, list):
+        return [str(v).strip() for v in x]
+    return [str(x).strip()]
+
+
+_schema_singleton: Optional[Schema] = None
+_schema_lock = threading.Lock()
+
+
+def _load_schema() -> Optional[Schema]:
+    """Load the schema from BIOCLAW_SCHEMA_FILE (default /opt/bioclaw/config/schema.yaml).
+    Returns None if PyYAML isn't installed or the file is missing — backends
+    fall back to the legacy multi-property probe in that case."""
+    global _schema_singleton
+    if _schema_singleton is not None:
+        return _schema_singleton
+    with _schema_lock:
+        if _schema_singleton is not None:
+            return _schema_singleton
+        path = os.environ.get("BIOCLAW_SCHEMA_FILE", Schema.DEFAULT_PATH)
+        if not os.path.exists(path):
+            print(f"[BIOKG] schema file not found at {path}; running schema-less")
+            return None
+        try:
+            import yaml  # PyYAML — ChromaDB ships it transitively in the OmegaClaw image.
+        except ImportError:
+            print("[BIOKG] PyYAML not installed; running schema-less")
+            return None
+        try:
+            with open(path) as f:
+                raw = yaml.safe_load(f) or {}
+            _schema_singleton = Schema(raw)
+            print(f"[BIOKG] loaded schema from {path}: "
+                  f"{len(_schema_singleton.entities)} entities, "
+                  f"{len(_schema_singleton.edges)} edges")
+            return _schema_singleton
+        except Exception as exc:
+            print(f"[BIOKG] schema load failed ({exc}); running schema-less")
+            return None
+
+
 # ─── backend selection ──────────────────────────────────────────────────────
 
 def _get_backend():
@@ -146,7 +309,7 @@ class DisabledBackend:
     def stage_edge(self, *args, **kwargs) -> str:
         return f"biokg unavailable ({self._reason}); cannot stage proposal"
 
-    def list_staging(self) -> str:
+    def list_staging(self, limit: int = 50) -> str:
         return f"biokg unavailable ({self._reason}); no staging area"
 
     def promote(self, sid: str) -> str:
@@ -154,6 +317,9 @@ class DisabledBackend:
 
     def reject(self, sid: str) -> str:
         return f"biokg unavailable ({self._reason}); cannot reject {sid!r}"
+
+    def describe_schema(self) -> str:
+        return f"biokg unavailable ({self._reason})"
 
 
 class Neo4jBackend:
@@ -166,15 +332,15 @@ class Neo4jBackend:
         self._driver = GraphDatabase.driver(uri, auth=(user, password))
         self._database = database
 
-        # Property names that might hold an entity's human-readable label.
-        # Defaults match the BioCypher human-schema entity types we use:
-        #   gene → gene_name; protein → protein_name; transcript → transcript_name;
-        #   pathway → pathway_name; GO terms / disease → term_name (inherits from
-        #   "ontology term"); fallback → id.
-        # Override by setting BIOKG_NAME_PROPERTIES=foo,bar in the env.
-        env_props = os.environ.get("BIOKG_NAME_PROPERTIES", "").strip()
+        # Load schema first; falls back to a hard-coded property list if the
+        # YAML file isn't present or PyYAML isn't installed.
+        self._schema = _load_schema()
+        env_props = os.environ.get("BIOCLAW_NAME_PROPERTIES",
+                    os.environ.get("BIOKG_NAME_PROPERTIES", "")).strip()
         if env_props:
             self._name_props = [p.strip() for p in env_props.split(",") if p.strip()]
+        elif self._schema is not None:
+            self._name_props = self._schema.name_properties()
         else:
             self._name_props = [
                 "gene_name",
@@ -250,21 +416,57 @@ class Neo4jBackend:
                    evidence: str = "", confidence: float = 0.7,
                    agent: str = "specialist") -> str:
         """Create a new edge between two existing entities, tagged as pending.
-        Returns a human-readable [STAGED edge <id>] line that the LLM can relay."""
-        # Sanitize edge type — Neo4j relationship types must be a single identifier-ish token.
+        If a schema is loaded, validates the edge type + endpoint types BEFORE
+        creating the edge. Returns a [STAGED edge <id>] line on success."""
         safe_edge_type = "".join(c for c in str(edge_type).strip() if c.isalnum() or c == "_")
         if not safe_edge_type:
             return f"error: invalid edge_type {edge_type!r} (use letters/digits/underscore)"
 
-        sid = uuid.uuid4().hex[:8]
+        # Schema check (if schema is loaded) — first verify the edge type exists.
+        if self._schema is not None and safe_edge_type not in self._schema.edges:
+            known = ", ".join(sorted(self._schema.edges)) or "(none)"
+            return (f"error: edge type {safe_edge_type!r} is not in the loaded BioCypher schema. "
+                    f"Known edge types: {known}")
+
+        # Find both endpoints first (no CREATE yet) so we can validate their types.
         src_clauses = " OR ".join(f"toLower(s.{p}) = toLower($src)" for p in self._name_props)
         tgt_clauses = " OR ".join(f"toLower(t.{p}) = toLower($tgt)" for p in self._name_props)
         coalesce_s = "coalesce(" + ", ".join(f"s.{p}" for p in self._name_props) + ")"
         coalesce_t = "coalesce(" + ", ".join(f"t.{p}" for p in self._name_props) + ")"
 
-        cypher = (
+        find_cypher = (
             f"MATCH (s) WHERE {src_clauses} WITH s LIMIT 1 "
             f"MATCH (t) WHERE {tgt_clauses} WITH s, t LIMIT 1 "
+            f"RETURN id(s) AS s_id, labels(s)[0] AS s_label, {coalesce_s} AS s_name, "
+            f"       id(t) AS t_id, labels(t)[0] AS t_label, {coalesce_t} AS t_name"
+        )
+        try:
+            with self._driver.session(database=self._database) as session:
+                row = session.run(
+                    find_cypher,
+                    src=str(source_name).strip(),
+                    tgt=str(target_name).strip(),
+                ).single()
+        except Exception as exc:
+            return f"biokg neo4j error resolving endpoints: {exc}"
+
+        if row is None:
+            return (f"error: cannot stage edge — source {source_name!r} or target {target_name!r} "
+                    f"not found in BioKG")
+
+        s_label = row["s_label"]
+        t_label = row["t_label"]
+
+        # Schema check (if loaded) — validate endpoint labels against the edge's declared types.
+        if self._schema is not None:
+            ok, reason = self._schema.validate_edge(safe_edge_type, s_label, t_label)
+            if not ok:
+                return f"error: schema validation failed: {reason}"
+
+        # Endpoints valid; create the staged edge.
+        sid = uuid.uuid4().hex[:8]
+        create_cypher = (
+            "MATCH (s) WHERE id(s) = $s_id MATCH (t) WHERE id(t) = $t_id "
             f"CREATE (s)-[r:`{safe_edge_type}` {{"
             "  _staging_id: $sid,"
             "  _staged_by: $agent,"
@@ -272,32 +474,32 @@ class Neo4jBackend:
             "  _evidence: $evidence,"
             "  _confidence: $confidence,"
             "  _status: 'pending'"
-            "}]->(t) "
-            f"RETURN labels(s)[0] AS s_label, {coalesce_s} AS s_name, "
-            f"       labels(t)[0] AS t_label, {coalesce_t} AS t_name"
+            "}]->(t) RETURN $sid AS sid"
         )
         try:
             with self._driver.session(database=self._database) as session:
-                result = session.run(
-                    cypher,
-                    src=str(source_name).strip(),
-                    tgt=str(target_name).strip(),
+                session.run(
+                    create_cypher,
+                    s_id=row["s_id"],
+                    t_id=row["t_id"],
                     sid=sid,
                     agent=str(agent),
                     evidence=str(evidence),
                     confidence=float(confidence),
                 )
-                row = result.single()
         except Exception as exc:
-            return f"biokg neo4j error staging edge: {exc}"
+            return f"biokg neo4j error creating staged edge: {exc}"
 
-        if row is None:
-            return (f"error: cannot stage edge — source {source_name!r} or target {target_name!r} "
-                    f"not found in BioKG")
-
-        return (f"[STAGED edge {sid}] ({row['s_label']}:{row['s_name']}) "
-                f"-[{safe_edge_type}]-> ({row['t_label']}:{row['t_name']}) "
+        return (f"[STAGED edge {sid}] ({s_label}:{row['s_name']}) "
+                f"-[{safe_edge_type}]-> ({t_label}:{row['t_name']}) "
                 f"by {agent}, evidence: {evidence!r}")
+
+    def describe_schema(self) -> str:
+        if self._schema is None:
+            return ("No schema loaded. biokg-stage runs without endpoint-type validation, "
+                    "and lookups probe a hardcoded property list. Set BIOCLAW_SCHEMA_FILE "
+                    "or install PyYAML + ensure /opt/bioclaw/config/schema.yaml exists.")
+        return self._schema.summary()
 
     def list_staging(self, limit: int = 50) -> str:
         """List all currently-pending staged edges."""
@@ -449,6 +651,9 @@ class MorkBackend:
 
     def reject(self, sid: str) -> str:
         return "biokg mork backend is not yet implemented; cannot reject"
+
+    def describe_schema(self) -> str:
+        return "biokg mork backend is not yet implemented; no schema available"
 
 
 # ─── tiny helpers ───────────────────────────────────────────────────────────

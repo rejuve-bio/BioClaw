@@ -6,11 +6,12 @@
 FROM singularitynet/omegaclaw:hackathon2604
 
 # Phase 2A: Neo4j driver for the biokg backend.
+# Phase 3: PyYAML for parsing the BioCypher schema config.
 # The upstream runtime image lacks pip (multistage build), so install it first.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends python3-pip \
  && rm -rf /var/lib/apt/lists/* \
- && python3 -m pip install --no-cache-dir --break-system-packages neo4j==5.27.0
+ && python3 -m pip install --no-cache-dir --break-system-packages neo4j==5.27.0 PyYAML
 
 # Drop our overlay onto the existing source tree. Files included:
 #   channels/internal_rpc.py    — new channel adapter
@@ -27,6 +28,7 @@ COPY overlay/src/         /PeTTa/repos/OmegaClaw-Core/src/
 COPY overlay/specialist-prompt.txt   /opt/bioclaw/specialist-prompt.txt
 COPY overlay/conductor-prompt.txt    /opt/bioclaw/conductor-prompt.txt
 COPY overlay/bioclaw-entrypoint.sh   /opt/bioclaw/bioclaw-entrypoint.sh
+COPY overlay/config/                 /opt/bioclaw/config/
 RUN chmod +x /opt/bioclaw/bioclaw-entrypoint.sh
 
 ENTRYPOINT ["/opt/bioclaw/bioclaw-entrypoint.sh"]

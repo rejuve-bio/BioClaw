@@ -40,6 +40,8 @@
     "- Promote a proposal into the BioKG (Conductor only, AFTER human approval): biokg-promote STAGING_ID"
     "  Example: biokg-promote a1b2c3d4"
     "- Reject and discard a proposal: biokg-reject STAGING_ID"
+    "- Describe the loaded BioKG schema (entity types + edge types with allowed endpoints): biokg-schema"
+    "  Use this if you're unsure which edge types are valid or which entity types exist in the KG."
     ;CODE EXECUTION:
     "- Execute MeTTa expression: metta sexpression"
     "Example to invoke Non-Axiomatic Logic via MeTTa: "
@@ -103,6 +105,9 @@
 
 (= (biokg-reject $sid)
    (py-call (biokg.reject $sid)))
+
+(= (biokg-schema)
+   (py-call (biokg.describe_schema)))
 
 !(import_prolog_functions_from_file (library OmegaClaw-Core ./src/skills.pl) (shell first_char))
 

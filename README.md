@@ -158,6 +158,93 @@ MATCH (g:gene {gene_name:'TP53'})-[r:enables]->(m)
 RETURN g.gene_name, r._status, r._staging_id, m;
 ```
 
+## Schema config
+
+BioClaw reads its KG schema from a **BioCypher-format YAML** file at
+`/opt/bioclaw/config/schema.yaml` (bundled with the image). It's the
+canonical biocypher-kg schema config, restricted to the entities and edges
+currently loaded into Neo4j (gene, protein, transcript, pathway, GO terms,
+disease + their 7 edge types).
+
+### What the loader extracts
+
+- **Nodes** (`represented_as: node`): the `input_label` becomes the Neo4j
+  label, the property annotated `biolink: name` becomes the lookup property.
+  Inheritance via `is_a` + `inherit_properties: true` is followed — that's
+  how the four GO terms and disease all pick up `term_name` from
+  `ontology term`.
+- **Edges** (`represented_as: edge`): `output_label` (or `input_label` if
+  absent) becomes the Neo4j relationship type. `source` and `target` (which
+  can be a single entity name or a list) become the allowed endpoint types
+  for `biokg-stage` validation.
+
+### Customizing
+
+Two knobs in `.env`:
+
+```bash
+# Point at any BioCypher schema_config.yaml (yours, the upstream biocypher-kg one, etc.)
+BIOCLAW_SCHEMA_FILE=/path/inside/container/schema.yaml
+
+# Override the auto-derived name-property list only if you really need to:
+BIOCLAW_NAME_PROPERTIES=gene_name,protein_name,term_name,id
+```
+
+To use a different schema file:
+
+```bash
+# Mount your file into the container in docker-compose.yml
+volumes:
+  - /host/path/hsa_schema_config.yaml:/etc/bioclaw/hsa_schema.yaml:ro
+
+# Then in .env:
+BIOCLAW_SCHEMA_FILE=/etc/bioclaw/hsa_schema.yaml
+```
+
+### Validation
+
+When `biokg-stage SRC|EDGE|TGT|...` is called, the loaded schema enforces:
+
+1. `EDGE` exists in the schema (rejects unknown edge types up-front)
+2. The Neo4j label of `SRC` is in the edge's allowed `source` list
+3. The Neo4j label of `TGT` is in the edge's allowed `target` list
+
+Violations return an `error: schema validation failed: ...` string instead of
+silently creating a malformed proposal.
+
+### Introspection skill
+
+Both the LLM and you can ask:
+
+```
+biokg-schema
+```
+
+→ prints all entity labels with their name property, plus all edge types
+with their allowed source/target labels.
+
+## Neo4j connection — switching instances
+
+All connection details live in `.env`. To point at a different Neo4j:
+
+```bash
+NEO4J_URI=bolt+s://your-host:7687     # plain bolt://, bolt+s://, neo4j+s://...
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=...
+NEO4J_DATABASE=neo4j                  # multi-DB Neo4j installs only
+```
+
+Then `docker compose up -d --force-recreate` so all 3 agents pick up the
+new endpoint. **Same code, different KG.**
+
+Cross-network reachability: if your Neo4j runs in a separate compose project
+on the same host, attach it to bioclaw's network so the agents can resolve
+its container name:
+
+```bash
+docker network connect bioclaw_default <neo4j-container>
+```
+
 ## Phase 0 limitations (by design)
 
 - **Identical specialists.** Phase 0 doesn't differentiate Query vs Annotation

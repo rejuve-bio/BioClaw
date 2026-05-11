@@ -1,0 +1,307 @@
+# BioClaw schema config — exact BioCypher format.
+#
+# This is a curated subset of the human BioCypher schema_config.yaml
+# (https://github.com/biocypher / rejuve-bio/biocypher-kg), restricted to the
+# 5-entity slice currently loaded into our Neo4j instance:
+#
+#   gene, protein, transcript, pathway, GO terms (BP/MF/CC), disease
+#
+# To point bioclaw at a richer schema (e.g. the full biocypher-kg config),
+# set BIOCLAW_SCHEMA_FILE=/path/to/hsa_schema_config.yaml in .env.
+#
+# The loader (overlay/src/biokg.py) extracts:
+#   - For nodes: the `input_label` (the Neo4j label) and the property
+#     annotated `biolink: name` (the human-readable name property).
+#     Inherits the name property from `is_a` parent if not declared locally.
+#   - For edges: the `input_label` (or `output_label` if present — Neo4j uses
+#     output_label when set), `source`, and `target`. Used to validate that
+#     `biokg-stage` proposals don't violate the schema.
+
+# ─── Parent ontology class ──────────────────────────────────────────────────
+ontology term:
+  is_a: ontology class
+  mixins: [biolink:OntologyClass]
+  biolink_category: "biolink:OntologyClass"
+  represented_as: node
+  input_label: ontology term
+  properties:
+    id:
+      type: str
+      biolink: id
+    term_name:
+      type: str
+      biolink: name
+    description:
+      type: str
+      biolink: description
+    synonym:
+      type: str[]
+      biolink: synonym
+    source:
+      type: str
+      biolink: knowledge_source
+    source_url:
+      type: str
+      biolink: source_web_page
+
+# ─── Nodes loaded today ─────────────────────────────────────────────────────
+gene:
+  represented_as: node
+  preferred_id: ensemble
+  input_label: gene
+  is_a: [coding element, position entity]
+  mixins: [biolink:Gene]
+  inherit_properties: true
+  properties:
+    gene_name:
+      type: str
+      biolink: name
+    gene_type:
+      type: str
+    synonym:
+      type: str[]
+      biolink: synonym
+  kgx_properties:
+    category: "biolink:Gene"
+
+protein:
+  represented_as: node
+  preferred_id: uniprot
+  input_label: protein
+  is_a: coding element
+  mixins: [biolink:Protein]
+  biolink_category: "biolink:Protein"
+  inherit_properties: true
+  properties:
+    accession:
+      type: str[]
+      biolink: xref
+    protein_name:
+      type: str
+      biolink: name
+    source:
+      type: str
+      biolink: knowledge_source
+    source_url:
+      type: str
+      biolink: source_web_page
+  kgx_properties:
+    category: "biolink:Protein"
+
+transcript:
+  represented_as: node
+  input_label: transcript
+  is_a: [coding element, position entity]
+  mixins: [biolink:Transcript]
+  biolink_category: "biolink:Transcript"
+  inherit_properties: true
+  kgx_properties:
+    category: "biolink:Transcript"
+  properties:
+    gene_name:
+      type: str
+      biolink: name
+    transcript_name:
+      type: str
+      biolink: name
+    transcript_id:
+      type: str
+      biolink: id
+    transcript_type:
+      type: str
+
+pathway:
+  is_a: biological process
+  represented_as: node
+  input_label: pathway
+  mixins: [biolink:Pathway]
+  biolink_category: "biolink:Pathway"
+  properties:
+    pathway_name:
+      type: str
+      biolink: name
+    pathway_url:
+      type: str
+      biolink: source_record_urls
+    evidence:
+      type: str
+      biolink: has_evidence
+    source:
+      type: str
+      biolink: knowledge_source
+    source_url:
+      type: str
+      biolink: source_web_page
+    taxon_id:
+      type: str
+      biolink: taxon
+  kgx_properties:
+    category: "biolink:Pathway"
+
+biological process:
+  is_a: ontology term
+  mixins: [biolink:BiologicalProcess]
+  biolink_category: "biolink:BiologicalProcess"
+  represented_as: node
+  input_label: biological_process
+  inherit_properties: true
+  kgx_properties:
+    category: "biolink:BiologicalProcess"
+
+molecular function:
+  is_a: ontology term
+  mixins: [biolink:MolecularActivity]
+  biolink_category: "biolink:MolecularActivity"
+  represented_as: node
+  input_label: molecular_function
+  inherit_properties: true
+  kgx_properties:
+    category: "biolink:MolecularActivity"
+
+cellular component:
+  is_a: ontology term
+  mixins: [biolink:CellularComponent]
+  biolink_category: "biolink:CellularComponent"
+  represented_as: node
+  input_label: cellular_component
+  inherit_properties: true
+  kgx_properties:
+    category: "biolink:CellularComponent"
+
+disease:
+  is_a: ontology term
+  represented_as: node
+  input_label: disease
+  mixins: [biolink:Disease]
+  biolink_category: "biolink:Disease"
+  inherit_properties: true
+  kgx_properties:
+    category: "biolink:Disease"
+
+# ─── Edges loaded today ─────────────────────────────────────────────────────
+transcribes to:
+  represented_as: edge
+  is_a: expression
+  biolink_predicate: "biolink:TranscriptToGeneRelationship"
+  inherit_properties: true
+  input_label: transcribes_to
+  source: gene
+  target: transcript
+  kgx_properties:
+    subject_category: "biolink:Gene"
+    object_category: "biolink:Transcript"
+    knowledge_level: "knowledge_assertion"
+    agent_type: "manual_agent"
+
+translates to:
+  is_a: expression
+  biolink_predicate: "biolink:translates_to"
+  inherit_properties: true
+  represented_as: edge
+  input_label: translates_to
+  source: transcript
+  target: protein
+  kgx_properties:
+    subject_category: "biolink:Transcript"
+    object_category: "biolink:Protein"
+    knowledge_level: "knowledge_assertion"
+    agent_type: "manual_agent"
+
+gene to pathway association:
+  description: >-
+    An interaction between a gene or gene product and a biological process or pathway.
+  is_a: annotation
+  mixins: [biolink:GeneToPathwayAssociation]
+  biolink_predicate: "biolink:participates_in"
+  inherit_properties: true
+  represented_as: edge
+  input_label: genes_pathways
+  output_label: participates_in
+  source: [gene, transcript, protein]
+  target: pathway
+  kgx_properties:
+    subject_category: "biolink:GeneOrGeneProduct"
+    object_category: "biolink:Pathway"
+    knowledge_level: "knowledge_assertion"
+    agent_type: "manual_agent"
+
+biological process gene:
+  is_a: go gene
+  biolink_predicate: "biolink:involved_in"
+  inherit_properties: true
+  represented_as: edge
+  input_label: biological_process_gene
+  output_label: involved_in
+  source: gene
+  target: biological process
+  kgx_properties:
+    subject_category: "biolink:Gene"
+    object_category: "biolink:BiologicalProcess"
+    knowledge_level: "knowledge_assertion"
+    agent_type: "manual_agent"
+
+molecular function gene:
+  is_a: go gene
+  biolink_predicate: "biolink:enables"
+  inherit_properties: true
+  represented_as: edge
+  input_label: molecular_function_gene
+  output_label: enables
+  source: gene
+  target: molecular function
+  kgx_properties:
+    subject_category: "biolink:Gene"
+    object_category: "biolink:MolecularActivity"
+    knowledge_level: "knowledge_assertion"
+    agent_type: "manual_agent"
+
+cellular component gene located in:
+  is_a: cellular component gene
+  biolink_predicate: "biolink:located_in"
+  inherit_properties: true
+  represented_as: edge
+  input_label: cellular_component_gene_located_in
+  output_label: located_in
+  source: gene
+  target: cellular component
+  kgx_properties:
+    subject_category: "biolink:Gene"
+    object_category: "biolink:CellularComponent"
+    knowledge_level: "knowledge_assertion"
+    agent_type: "manual_agent"
+
+gene is implicated in disease:
+  description: >-
+    A gene is implicated in a disease. From Alliance for Genome Resources.
+  is_a: association
+  mixins: [biolink:Association]
+  biolink_predicate: "biolink:implicated_in"
+  inherit_properties: true
+  represented_as: edge
+  input_label: is_implicated_in
+  source: gene
+  target: disease
+  kgx_properties:
+    subject_category: "biolink:Gene"
+    object_category: "biolink:Disease"
+    knowledge_level: "knowledge_assertion"
+    agent_type: "manual_agent"
+  properties:
+    taxon_id:
+      type: integer
+    species_name:
+      type: string
+    gene_symbol:
+      type: string
+    disease_name:
+      type: string
+    evidence_code:
+      type: string
+    evidence_code_name:
+      type: string
+    reference:
+      type: string
+    date:
+      type: string
+    source:
+      type: string
