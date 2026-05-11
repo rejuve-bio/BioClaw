@@ -30,6 +30,7 @@ x-common-env: &common-env
   BIOKG_NAME_PROPERTIES: ${BIOKG_NAME_PROPERTIES:-}
   BIOCLAW_NAME_PROPERTIES: ${BIOCLAW_NAME_PROPERTIES:-}
   BIOCLAW_SCHEMA_FILE: ${BIOCLAW_SCHEMA_FILE:-/opt/bioclaw/config/schema.yaml}
+  BIOCLAW_DATASOURCE_FILE: ${BIOCLAW_DATASOURCE_FILE:-/opt/bioclaw/config/data_sources.yaml}
   MORK_URI: ${MORK_URI:-}
 
 services:
@@ -45,9 +46,12 @@ services:
     depends_on:
       - query-oc
       - annotation-oc
+      - relation-oc
+      - provenance-oc
+      - explanation-oc
     environment:
       <<: *common-env
-      BIOCLAW_PEERS: "query=http://query-oc:8080,annotation=http://annotation-oc:8080"
+      BIOCLAW_PEERS: "query=http://query-oc:8080,annotation=http://annotation-oc:8080,relation=http://relation-oc:8080,provenance=http://provenance-oc:8080,explanation=http://explanation-oc:8080"
       BIOCLAW_PROMPT: "conductor"
     command:
       - "commchannel=${COMMCHANNEL:-telegram}"
@@ -80,7 +84,7 @@ services:
     restart: unless-stopped
     environment:
       <<: *common-env
-      BIOCLAW_PROMPT: "specialist"
+      BIOCLAW_PROMPT: "query"
     command:
       - "commchannel=internal-rpc"
       - "provider=${LLM_PROVIDER}"
@@ -105,7 +109,7 @@ services:
     restart: unless-stopped
     environment:
       <<: *common-env
-      BIOCLAW_PROMPT: "specialist"
+      BIOCLAW_PROMPT: "annotation"
     command:
       - "commchannel=internal-rpc"
       - "provider=${LLM_PROVIDER}"
@@ -121,7 +125,85 @@ services:
       - /run:size=16m,mode=755
       - /var/tmp:size=64m,mode=1777
 
+  relation-oc:
+    image: bioclaw:phase0
+    container_name: bioclaw-relation-oc
+    init: true
+    tty: true
+    stdin_open: true
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      BIOCLAW_PROMPT: "relation"
+    command:
+      - "commchannel=internal-rpc"
+      - "provider=${LLM_PROVIDER}"
+      - "embeddingprovider=${EMBED_PROVIDER}"
+      - "maxHistory=${SPECIALIST_MAX_HISTORY:-3000}"
+      - "maxFeedback=${SPECIALIST_MAX_FEEDBACK:-5000}"
+      - "RPC_ROLE=relation"
+      - "RPC_PORT=8080"
+    volumes:
+      - relation-memory:/PeTTa/repos/OmegaClaw-Core/memory
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /run:size=16m,mode=755
+      - /var/tmp:size=64m,mode=1777
+
+  provenance-oc:
+    image: bioclaw:phase0
+    container_name: bioclaw-provenance-oc
+    init: true
+    tty: true
+    stdin_open: true
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      BIOCLAW_PROMPT: "provenance"
+    command:
+      - "commchannel=internal-rpc"
+      - "provider=${LLM_PROVIDER}"
+      - "embeddingprovider=${EMBED_PROVIDER}"
+      - "maxHistory=${SPECIALIST_MAX_HISTORY:-3000}"
+      - "maxFeedback=${SPECIALIST_MAX_FEEDBACK:-5000}"
+      - "RPC_ROLE=provenance"
+      - "RPC_PORT=8080"
+    volumes:
+      - provenance-memory:/PeTTa/repos/OmegaClaw-Core/memory
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /run:size=16m,mode=755
+      - /var/tmp:size=64m,mode=1777
+
+  explanation-oc:
+    image: bioclaw:phase0
+    container_name: bioclaw-explanation-oc
+    init: true
+    tty: true
+    stdin_open: true
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      BIOCLAW_PROMPT: "explanation"
+    command:
+      - "commchannel=internal-rpc"
+      - "provider=${LLM_PROVIDER}"
+      - "embeddingprovider=${EMBED_PROVIDER}"
+      - "maxHistory=${SPECIALIST_MAX_HISTORY:-3000}"
+      - "maxFeedback=${SPECIALIST_MAX_FEEDBACK:-5000}"
+      - "RPC_ROLE=explanation"
+      - "RPC_PORT=8080"
+    volumes:
+      - explanation-memory:/PeTTa/repos/OmegaClaw-Core/memory
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /run:size=16m,mode=755
+      - /var/tmp:size=64m,mode=1777
+
 volumes:
   conductor-memory:
   query-memory:
   annotation-memory:
+  relation-memory:
+  provenance-memory:
+  explanation-memory:

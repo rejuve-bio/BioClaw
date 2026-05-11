@@ -245,9 +245,95 @@ its container name:
 docker network connect bioclaw_default <neo4j-container>
 ```
 
+## Phase 3 — specialist differentiation + reasoning-adjacent agents
+
+The stack now runs **5 specialists** with distinct prompts and access scopes,
+all coordinated by the Conductor over the same `internal-rpc` channel.
+
+### Specialists and scopes
+
+| Specialist | Role | KG access |
+|---|---|---|
+| **query**       | Read-only factual lookups | `biokg-lookup`, `biokg-query`, `biokg-schema` |
+| **annotation**  | Propose new annotations (GO terms, gene–function edges) | + `biokg-stage` |
+| **relation**    | Propose new edges via graph traversal patterns (transitivity, co-membership) | + `biokg-stage`, heavy `biokg-query` use |
+| **provenance**  | Answer "who proposed which edge and when" | + `biokg-provenance` |
+| **explanation** | Explain WHY a result holds by tracing supporting edges + their provenance | + `biokg-provenance` (read-only) |
+
+Skill access is enforced by **prompt** (each specialist's system prompt lists
+the skills it may call; calling forbidden skills like `biokg-promote` is
+explicitly disallowed). For hard enforcement we'd add a server-side
+permission check; the prompt-level enforcement is sufficient for the paper's
+intent.
+
+### Provenance — two complementary kinds
+
+BioClaw's `biokg-provenance ENTITY` returns BOTH kinds the KG carries:
+
+1. **BioCypher source provenance** — embedded directly by the BioCypher
+   pipeline when ingesting from external databases:
+   - On nodes: `source`, `source_url` (e.g. `source=GENCODE`,
+     `source=UniProt`, `source=Reactome`)
+   - On edges (especially GAF / Alliance): `source`, `db_reference`,
+     `evidence`, `evidence_code`, `evidence_code_name`, `reference`, `date`
+   - Output tag: `[BioCypher: edge source=...; db_ref=...; ...]`
+2. **BioClaw agent provenance** — written by specialists via `biokg-stage`
+   and preserved on `biokg-promote`:
+   - `_staged_by`, `_staged_at`, `_evidence`, `_confidence`,
+     `_promoted_at`, `_status`
+   - Output tag: `[BioClaw: proposed by AGENT on DATE; status=...; ...]`
+
+`promote()` in Phase 3 was fixed to RETAIN the agent provenance fields
+(originally Phase 2B stripped them all). Only `_staging_id` and `_status`
+(pending-state markers) are removed; everything else stays so the lineage
+is queryable forever.
+
+An edge can have both kinds (rare — a specialist could later "re-stage" a
+BioCypher edge), just one (typical), or neither (rare — a manually-inserted
+edge without either source or agent fields).
+
+### Data-source registry
+
+`overlay/config/data_sources.yaml` maps source tokens that appear in Neo4j
+(`source=gaf`, `source=GENCODE`, `source=Gene Ontology`, ...) to their full
+name + canonical URL(s). `biokg-provenance` resolves these automatically —
+you'll see `Gene Ontology <http://purl.obolibrary.org/obo/go.owl>` in the
+output instead of the bare token.
+
+The bundled registry covers all sources reachable from our 5-entity slice
+(`agr`, `gencode`, `uniprot`, `reactome`, `gaf` from BioCypher's YAML, plus
+`Gene Ontology`, `Disease Ontology`, `Human Phenotype Ontology`, etc. from
+adapter code). Extend the file or point at the upstream config via
+`BIOCLAW_DATASOURCE_FILE=/path/to/biocypher-kg/config/hsa/hsa_data_source_config.yaml`
+to cover more.
+
+The new `biokg-source SOURCE_KEY` skill resolves a single token on demand —
+useful when a specialist sees a source token they don't recognize.
+
+### Routing the Conductor uses
+
+The Conductor's prompt routes incoming HUMAN_MESSAGEs as follows (matched
+in order):
+
+| User intent | Routed to |
+|---|---|
+| "what does GENE do" / "tell me about" / "list pathways" | query |
+| "propose" / "stage" / "suggest annotation" / "add edge" | annotation |
+| "find candidate edges" / "infer via transitivity" / "suggest new relations" | relation |
+| "who proposed" / "where did this come from" / "provenance" | provenance |
+| "why does the KG say" / "explain" / "how do we know" | explanation |
+| greetings / "what skills" / "list specialists" | answered directly |
+| anything else | polite redirect to a biology question |
+
+### One-prompt entrypoint
+
+`overlay/bioclaw-entrypoint.sh` now generalizes the prompt swap — it looks
+for `/opt/bioclaw/${BIOCLAW_PROMPT}-prompt.txt`. So adding a new specialist
+in the future is just: add `<role>-prompt.txt`, add a service in compose
+with `BIOCLAW_PROMPT=<role>`, add the URL to the Conductor's
+`BIOCLAW_PEERS`, mention it in the Conductor prompt's routing rules.
+
 ## Phase 0 limitations (by design)
 
-- **Identical specialists.** Phase 0 doesn't differentiate Query vs Annotation
-  agents in prompting or skill set beyond routing labels — Phase 3 work.
 - **Wholesale-replaced upstream files.** `channels.metta` and `skills.metta`
   in `overlay/` are full copies. If upstream changes them, re-merge here.

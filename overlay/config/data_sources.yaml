@@ -1,0 +1,72 @@
+# BioClaw bundled data-source registry.
+#
+# This is the BioCypher per-source metadata: each entry is a `source` token
+# that appears in Neo4j node/edge properties, mapped to its human name +
+# canonical URL(s). When ProvenanceOC reports an edge has `source=GO`, the
+# loader resolves that to `Gene Ontology (http://purl.obolibrary.org/obo/go.owl)`.
+#
+# Override via BIOCLAW_DATASOURCE_FILE=/path/to/your/data_sources.yaml.
+# Or point at the upstream biocypher-kg config:
+#   BIOCLAW_DATASOURCE_FILE=/path/biocypher-kg/config/hsa/hsa_data_source_config.yaml
+#
+# Keys here cover ALL sources reachable from our 5-entity slice. Sources used
+# elsewhere (bgee, gtex, tflink, etc.) aren't included by default — extend the
+# file or point at the upstream config if you load those adapters.
+
+# ─── Sources defined in biocypher-kg/config/hsa/hsa_data_source_config.yaml ──
+agr:
+  name: Alliance of Genome Resources
+  url:
+    - https://fms.alliancegenome.org/download/DISEASE-ALLIANCE_COMBINED.tsv.gz
+
+gencode:
+  name: GENCODE v49
+  url: https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/latest_release/gencode.v49.annotation.gtf.gz
+
+uniprot:
+  name: UniProtKB/Swiss-Prot
+  url: https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/taxonomic_divisions/uniprot_sprot_human.dat.gz
+
+reactome:
+  name: Reactome
+  url:
+    - https://reactome.org/download/current/ReactomePathways.txt
+    - https://reactome.org/download/current/ReactomePathwaysRelation.txt
+    - https://reactome.org/download/current/Ensembl2Reactome_All_Levels.txt
+    - https://reactome.org/download/current/ReactionPMIDS.txt
+
+gaf:
+  name: GO Annotation File (GAF)
+  url: http://geneontology.org/gene-associations/goa_human.gaf.gz
+
+# ─── Sources defined in adapter code (not in hsa_data_source_config.yaml) ──
+# These tokens appear as `source` on nodes/edges but the URL+name live in
+# the adapter source instead of the config YAML. Mirrored here so
+# biokg-provenance + biokg-source can resolve them.
+Gene Ontology:
+  name: Gene Ontology
+  url: http://purl.obolibrary.org/obo/go.owl
+
+Disease Ontology:
+  name: Disease Ontology
+  url: https://purl.obolibrary.org/obo/do.owl
+
+Human Phenotype Ontology:
+  name: Human Phenotype Ontology
+  url: https://hpo.jax.org/
+
+GENCODE:
+  name: GENCODE v49
+  url: https://www.gencodegenes.org/
+
+UniProt:
+  name: UniProtKB/Swiss-Prot
+  url: https://www.uniprot.org/
+
+Reactome:
+  name: Reactome
+  url: https://reactome.org/
+
+Alliance of Genome Resources:
+  name: Alliance of Genome Resources
+  url: https://www.alliancegenome.org/

@@ -42,6 +42,15 @@
     "- Reject and discard a proposal: biokg-reject STAGING_ID"
     "- Describe the loaded BioKG schema (entity types + edge types with allowed endpoints): biokg-schema"
     "  Use this if you're unsure which edge types are valid or which entity types exist in the KG."
+    "- Show provenance for an entity: biokg-provenance ENTITY_NAME"
+    "  Returns BOTH kinds of provenance the BioKG carries:"
+    "    [BioCypher: edge source=GO Annotation File (GAF) <url>; db_ref=PMID:...; evidence_code=IDA; reference=...; target source=Gene Ontology <url>] — for BioCypher-loaded edges"
+    "    [BioClaw: proposed by AGENT on DATE; status=...; promoted_at=...; evidence=...] — for specialist-proposed edges"
+    "  Source tokens are auto-resolved via the data-source registry to their full name + URL."
+    "  Example: biokg-provenance TP53"
+    "- Resolve a single BioCypher data-source token (e.g. 'gaf', 'GENCODE') into name + URL: biokg-source SOURCE_KEY"
+    "  Use when you have a source string from a provenance result and want the canonical URL/version."
+    "  Example: biokg-source gaf"
     ;CODE EXECUTION:
     "- Execute MeTTa expression: metta sexpression"
     "Example to invoke Non-Axiomatic Logic via MeTTa: "
@@ -108,6 +117,12 @@
 
 (= (biokg-schema)
    (py-call (biokg.describe_schema)))
+
+(= (biokg-provenance $name)
+   (py-call (biokg.provenance $name)))
+
+(= (biokg-source $key)
+   (py-call (biokg.describe_source $key)))
 
 !(import_prolog_functions_from_file (library OmegaClaw-Core ./src/skills.pl) (shell first_char))
 

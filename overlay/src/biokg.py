@@ -109,6 +109,29 @@ def describe_schema() -> str:
     return _get_backend().describe_schema()
 
 
+def provenance(entity_name: str) -> str:
+    """Return provenance info for all edges (incident to entity_name).
+    Reports both BioCypher source provenance (source DB, db_reference, evidence
+    code, reference, date) and BioClaw agent provenance (who staged/promoted)."""
+    name = str(entity_name).strip().strip('"').strip("'").strip()
+    if not name:
+        return "error: biokg-provenance requires an entity name"
+    return _get_backend().provenance(name)
+
+
+def describe_source(source_key: str) -> str:
+    """Resolve a BioCypher source token (e.g. 'gaf', 'GENCODE', 'Gene Ontology')
+    into its full name + URL(s) from the bundled data-source registry."""
+    key = str(source_key).strip().strip('"').strip("'").strip()
+    if not key:
+        return "error: biokg-source requires a source key"
+    ds = _load_datasources()
+    if ds is None:
+        return ("data-source registry not loaded "
+                "(BIOCLAW_DATASOURCE_FILE missing or PyYAML unavailable)")
+    return ds.describe(key)
+
+
 # ─── BioCypher schema loader ────────────────────────────────────────────────
 # Parses a BioCypher schema_config.yaml (full or curated subset) and exposes:
 #   entities[label] = { name_prop, all_labels (incl. inherited) }
@@ -238,8 +261,62 @@ def _aslist(x):
     return [str(x).strip()]
 
 
+class DataSources:
+    """Registry of BioCypher source tokens → human name + URL(s).
+
+    A source token is whatever ends up in Neo4j as `n.source` or `r.source`
+    (e.g. 'gaf', 'GENCODE', 'Gene Ontology'). Lookup is case-insensitive and
+    tries both the raw key and a few common normalizations because BioCypher
+    YAML keys are lowercase ('gencode') while adapter code emits PascalCase
+    ('GENCODE').
+    """
+    DEFAULT_PATH = "/opt/bioclaw/config/data_sources.yaml"
+
+    def __init__(self, entries: dict):
+        # Pre-build a case-insensitive index.
+        self._index = {}
+        for key, body in (entries or {}).items():
+            if not isinstance(body, dict):
+                continue
+            self._index[str(key).strip().lower()] = (str(key), body)
+
+    def resolve(self, source_key: str) -> Optional[dict]:
+        """Return the registry entry for a source token, or None."""
+        if not source_key:
+            return None
+        norm = str(source_key).strip().lower()
+        return self._index.get(norm, (None, None))[1]
+
+    def display(self, source_key: str) -> str:
+        """Inline display string for a source token (used in provenance output)."""
+        entry = self.resolve(source_key)
+        if not entry:
+            return source_key
+        name = entry.get("name") or source_key
+        url = entry.get("url")
+        url_str = url[0] if isinstance(url, list) and url else url
+        return f"{name} <{url_str}>" if url_str else name
+
+    def describe(self, source_key: str) -> str:
+        """Full description (used by biokg-source skill)."""
+        entry = self.resolve(source_key)
+        if not entry:
+            return (f"Source token {source_key!r} is not in the data-source registry. "
+                    f"Known keys: {', '.join(sorted(orig for orig, _ in self._index.values()))[:400]}")
+        name = entry.get("name") or source_key
+        urls = entry.get("url") or []
+        if not isinstance(urls, list):
+            urls = [urls]
+        lines = [f"{source_key} → {name}"]
+        for u in urls:
+            lines.append(f"  url: {u}")
+        return "\n".join(lines)
+
+
 _schema_singleton: Optional[Schema] = None
 _schema_lock = threading.Lock()
+_datasources_singleton: Optional[DataSources] = None
+_datasources_lock = threading.Lock()
 
 
 def _load_schema() -> Optional[Schema]:
@@ -271,6 +348,37 @@ def _load_schema() -> Optional[Schema]:
             return _schema_singleton
         except Exception as exc:
             print(f"[BIOKG] schema load failed ({exc}); running schema-less")
+            return None
+
+
+def _load_datasources() -> Optional[DataSources]:
+    """Load the data-source registry from BIOCLAW_DATASOURCE_FILE
+    (default /opt/bioclaw/config/data_sources.yaml). Returns None if missing
+    or PyYAML unavailable — provenance output then leaves source tokens raw."""
+    global _datasources_singleton
+    if _datasources_singleton is not None:
+        return _datasources_singleton
+    with _datasources_lock:
+        if _datasources_singleton is not None:
+            return _datasources_singleton
+        path = os.environ.get("BIOCLAW_DATASOURCE_FILE", DataSources.DEFAULT_PATH)
+        if not os.path.exists(path):
+            print(f"[BIOKG] data-source registry not found at {path}")
+            return None
+        try:
+            import yaml
+        except ImportError:
+            print("[BIOKG] PyYAML not installed; data-source registry unavailable")
+            return None
+        try:
+            with open(path) as f:
+                raw = yaml.safe_load(f) or {}
+            _datasources_singleton = DataSources(raw)
+            print(f"[BIOKG] loaded data-source registry from {path}: "
+                  f"{len(_datasources_singleton._index)} sources")
+            return _datasources_singleton
+        except Exception as exc:
+            print(f"[BIOKG] data-source load failed ({exc})")
             return None
 
 
@@ -328,6 +436,12 @@ class DisabledBackend:
     def describe_schema(self) -> str:
         return f"biokg unavailable ({self._reason})"
 
+    def provenance(self, name: str) -> str:
+        return f"biokg unavailable ({self._reason}); no provenance"
+
+    def describe_source(self, key: str) -> str:
+        return f"biokg unavailable ({self._reason}); no data-source registry"
+
 
 class Neo4jBackend:
     """Neo4j-backed KG. Speaks Cypher."""
@@ -342,6 +456,8 @@ class Neo4jBackend:
         # Load schema first; falls back to a hard-coded property list if the
         # YAML file isn't present or PyYAML isn't installed.
         self._schema = _load_schema()
+        # Load BioCypher data-source registry (best-effort).
+        self._datasources = _load_datasources()
         env_props = os.environ.get("BIOCLAW_NAME_PROPERTIES",
                     os.environ.get("BIOKG_NAME_PROPERTIES", "")).strip()
         if env_props:
@@ -508,6 +624,129 @@ class Neo4jBackend:
                     "or install PyYAML + ensure /opt/bioclaw/config/schema.yaml exists.")
         return self._schema.summary()
 
+    def provenance(self, name: str, limit: int = 30) -> str:
+        """Return provenance for an entity. Covers two complementary kinds:
+
+        1. **BioCypher source provenance** — node `source`/`source_url` and
+           edge fields like `source`, `db_reference`, `evidence`,
+           `evidence_code`, `reference`, `date` that BioCypher writes when
+           ingesting from external databases (GO Annotation File, Alliance,
+           Reactome, etc.).
+        2. **BioClaw agent provenance** — edge fields `_staged_by`,
+           `_staged_at`, `_evidence`, `_confidence`, `_promoted_at`,
+           `_status` that specialists write via `biokg-stage` /
+           `biokg-promote`.
+        """
+        match_clauses = " OR ".join(f"toLower(n.{p}) = toLower($name)" for p in self._name_props)
+        coalesce_n = "coalesce(" + ", ".join(f"n.{p}" for p in self._name_props) + ")"
+        coalesce_m = "coalesce(" + ", ".join(f"m.{p}" for p in self._name_props) + ")"
+        cypher = (
+            f"MATCH (n) WHERE {match_clauses} WITH n LIMIT 1 "
+            "OPTIONAL MATCH (n)-[r]-(m) "
+            f"RETURN labels(n)[0] AS n_label, {coalesce_n} AS n_name, "
+            "       n.source                AS n_source, "
+            "       n.source_url            AS n_source_url, "
+            "       type(r)                 AS rel, "
+            "       startNode(r) = n        AS outgoing, "
+            f"      labels(m)[0]            AS m_label, {coalesce_m} AS m_name, "
+            "       m.source                AS m_source, "
+            "       m.source_url            AS m_source_url, "
+            "       r.source                AS r_source, "
+            "       r.db_reference          AS r_db_reference, "
+            "       r.evidence              AS r_evidence, "
+            "       r.evidence_code         AS r_evidence_code, "
+            "       r.evidence_code_name    AS r_evidence_code_name, "
+            "       r.reference             AS r_reference, "
+            "       r.date                  AS r_date, "
+            "       r._staged_by            AS agent, "
+            "       r._staged_at            AS staged_at, "
+            "       r._evidence             AS agent_evidence, "
+            "       r._confidence           AS agent_confidence, "
+            "       r._promoted_at          AS promoted_at, "
+            "       r._status               AS status "
+            f"LIMIT {int(limit)}"
+        )
+        try:
+            with self._driver.session(database=self._database) as session:
+                rows = list(session.run(cypher, name=name))
+        except Exception as exc:
+            return f"biokg neo4j error: {exc}"
+
+        if not rows:
+            return f"No entity matching {name!r} found in BioKG."
+
+        n_label = rows[0]["n_label"]
+        n_name = rows[0]["n_name"]
+        out = [f"Provenance for {n_label}:{n_name}:"]
+
+        def _src(token):
+            """Resolve a BioCypher source token via the data-source registry, or pass through."""
+            if not token:
+                return token
+            if self._datasources is None:
+                return str(token)
+            return self._datasources.display(str(token))
+
+        # Node-level provenance (the entity itself)
+        node_src = rows[0].get("n_source")
+        node_url = rows[0].get("n_source_url")
+        if node_src or node_url:
+            resolved = _src(node_src) if node_src else None
+            url_part = f" url={node_url}" if node_url and (not resolved or "<" not in resolved) else ""
+            out.append(f"  node source: {resolved or node_src or '—'}{url_part}")
+
+        # Edges — handle the "no edges at all" case
+        edge_rows = [r for r in rows if r.get("rel") is not None]
+        if not edge_rows:
+            out.append("  no connected edges in BioKG")
+            return "\n".join(out)
+
+        out.append(f"  edges ({len(edge_rows)} shown):")
+        for r in edge_rows:
+            arrow = "->" if r.get("outgoing") else "<-"
+            line = f"    {arrow}[{r['rel']}]{arrow[-1]} ({r['m_label']}:{r['m_name']})"
+
+            # Source provenance (BioCypher)
+            biocypher_bits = []
+            if r.get("r_source"):
+                biocypher_bits.append(f"edge source={_src(r['r_source'])}")
+            if r.get("r_db_reference"):
+                biocypher_bits.append(f"db_ref={_short(r['r_db_reference'], 60)}")
+            if r.get("r_evidence_code"):
+                biocypher_bits.append(f"evidence_code={r['r_evidence_code']}")
+            if r.get("r_evidence") and not r.get("agent"):
+                biocypher_bits.append(f"evidence={_short(r['r_evidence'], 60)}")
+            if r.get("r_reference"):
+                biocypher_bits.append(f"reference={_short(r['r_reference'], 60)}")
+            if r.get("r_date"):
+                biocypher_bits.append(f"date={r['r_date']}")
+            if r.get("m_source"):
+                biocypher_bits.append(f"target source={_src(r['m_source'])}")
+            if biocypher_bits:
+                line += "  [BioCypher: " + "; ".join(biocypher_bits) + "]"
+
+            # Agent provenance (BioClaw specialist)
+            if r.get("agent"):
+                status = r.get("status") or "promoted"
+                promoted = r.get("promoted_at") or "—"
+                agent_bits = [
+                    f"proposed by {r['agent']} on {r['staged_at']}",
+                    f"status={status}",
+                    f"promoted_at={promoted}",
+                ]
+                if r.get("agent_confidence") is not None:
+                    agent_bits.append(f"confidence={r['agent_confidence']}")
+                if r.get("agent_evidence"):
+                    agent_bits.append(f"evidence={_short(r['agent_evidence'], 60)}")
+                line += "  [BioClaw: " + "; ".join(agent_bits) + "]"
+
+            if not biocypher_bits and not r.get("agent"):
+                line += "  [no provenance recorded]"
+
+            out.append(line)
+
+        return "\n".join(out)
+
     def list_staging(self, limit: int = 50) -> str:
         """List all currently-pending staged edges."""
         coalesce_s = "coalesce(" + ", ".join(f"s.{p}" for p in self._name_props) + ")"
@@ -544,13 +783,15 @@ class Neo4jBackend:
         return "\n".join(lines)
 
     def promote(self, staging_id: str) -> str:
-        """Promote a staged edge: strip its staging properties so it becomes
-        indistinguishable from a 'truth' edge."""
+        """Promote a staged edge into BioKG. Removes the pending-status fields
+        (_staging_id, _status) but RETAINS provenance (_staged_by, _staged_at,
+        _evidence, _confidence) so ProvenanceOC can trace lineage later. Also
+        stamps a _promoted_at timestamp."""
         cypher = (
             "MATCH (s)-[r]->(t) WHERE r._staging_id = $sid "
             "WITH s, r, t, type(r) AS rel "
-            "REMOVE r._staging_id, r._staged_by, r._staged_at, "
-            "       r._evidence, r._confidence, r._status "
+            "REMOVE r._staging_id, r._status "
+            "SET r._promoted_at = toString(datetime()) "
             "RETURN rel"
         )
         try:
@@ -566,7 +807,7 @@ class Neo4jBackend:
         # Invalidate any cached lookups that may have predated the new edge.
         with _cache_lock:
             _cache.clear()
-        return f"Promoted [{staging_id}] (edge type {row['rel']}) into BioKG."
+        return f"Promoted [{staging_id}] (edge type {row['rel']}) into BioKG; provenance retained."
 
     def reject(self, staging_id: str) -> str:
         """Discard a staged edge entirely."""
@@ -661,6 +902,12 @@ class MorkBackend:
 
     def describe_schema(self) -> str:
         return "biokg mork backend is not yet implemented; no schema available"
+
+    def provenance(self, name: str) -> str:
+        return "biokg mork backend is not yet implemented; no provenance"
+
+    def describe_source(self, key: str) -> str:
+        return "biokg mork backend is not yet implemented; no data-source registry"
 
 
 # ─── tiny helpers ───────────────────────────────────────────────────────────
