@@ -70,3 +70,14 @@ Reactome:
 Alliance of Genome Resources:
   name: Alliance of Genome Resources
   url: https://www.alliancegenome.org/
+
+# Source tokens that the GAF adapter emits on individual edges (one per GAF line).
+# 'GOA' is the UniProt-GOA project (curated GO annotations).
+GOA:
+  name: UniProt-GOA (Gene Ontology Annotation)
+  url: https://www.ebi.ac.uk/GOA
+
+# Some adapters use the all-caps form 'UNIPROT'.
+UNIPROT:
+  name: UniProtKB/Swiss-Prot
+  url: https://www.uniprot.org/

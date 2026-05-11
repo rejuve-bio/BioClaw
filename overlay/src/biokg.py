@@ -711,7 +711,7 @@ class Neo4jBackend:
             if r.get("r_source"):
                 biocypher_bits.append(f"edge source={_src(r['r_source'])}")
             if r.get("r_db_reference"):
-                biocypher_bits.append(f"db_ref={_short(r['r_db_reference'], 60)}")
+                biocypher_bits.append(f"db_ref={_format_refs(r['r_db_reference'])}")
             if r.get("r_evidence_code"):
                 biocypher_bits.append(f"evidence_code={r['r_evidence_code']}")
             if r.get("r_evidence") and not r.get("agent"):
@@ -924,3 +924,30 @@ def _short(value: Any, limit: int = 80) -> str:
     if len(s) <= limit:
         return s
     return s[: limit - 3] + "..."
+
+
+def _format_refs(value: Any) -> str:
+    """Format a db_reference value. BioCypher GAF emits JSON-stringified lists
+    like '["15629713", "20206173"]' — render those as 'PMID:15629713, PMID:20206173'.
+    Falls back to the raw string for any other shape."""
+    if value is None or value == "":
+        return ""
+    s = str(value).strip()
+    # JSON-list of bare numerics → assume PMIDs
+    if s.startswith("[") and s.endswith("]"):
+        try:
+            import json
+            parsed = json.loads(s)
+            if isinstance(parsed, list):
+                refs = []
+                for v in parsed[:5]:
+                    v = str(v).strip()
+                    if v.isdigit():
+                        refs.append(f"PMID:{v}")
+                    else:
+                        refs.append(v)
+                tail = f" (+{len(parsed)-5} more)" if len(parsed) > 5 else ""
+                return ", ".join(refs) + tail
+        except Exception:
+            pass
+    return _short(s, 60)

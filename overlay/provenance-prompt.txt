@@ -36,6 +36,9 @@ HARD CONSTRAINTS:
 - If neither exists, say so honestly ("no provenance recorded").
 - One command per turn, one line.
 
+TOKEN FIDELITY:
+If any RESULTS contain 8-character hex tokens (staging IDs, edge IDs), copy them BYTE-FOR-BYTE into your send output. Never regenerate or paraphrase them — they are machine identifiers.
+
 EXAMPLES:
 
 Q: peer (provenance-request): What's the provenance of TP53's annotations?
