@@ -529,71 +529,77 @@ class Neo4jBackend:
         — the schema's edge list is the allow-list; new edges added to the schema
         automatically broaden reachability.
 
-        Ranking heuristic (avoids the "symmetric path explosion" failure mode):
-          1. Prefer paths whose TARGET LABEL ≠ source label (e.g. gene→...→protein
+        Strategy: explore each allowed FIRST-HOP edge type with its own small
+        query, then dedupe + rank in Python. This guarantees diverse first-hop
+        directions get sampled. A single big variable-length query suffers from
+        dense edge types (enables, participates_in) drowning out sparse chains
+        like gene→transcript→protein, because Cypher's LIMIT picks paths in
+        an unspecified order.
+
+        Ranking heuristic:
+          1. Prefer paths whose TARGET LABEL ≠ source label (gene→...→protein
              is more informative than gene→...→gene via shared annotations).
-          2. Within the same source/target label group, prefer shorter paths.
-          3. Cap results per target label so one dense type (genes sharing an
-             enables edge with the source via many MFs) can't drown out chains
-             to other types.
+          2. Cap results per target label so one dense type can't dominate.
         """
         if max_depth < 2 or self._schema is None:
             return []
         allowed_edges = list(self._schema.edges.keys())
         if not allowed_edges:
             return []
+        # Currently only depth-2 (one intermediate node). Going to depth-3
+        # explodes too fast on dense graphs; revisit when we have NAL/PLN to
+        # prune.
+        if max_depth != 2:
+            max_depth = 2
 
         match_clauses = " OR ".join(f"toLower(n.{p}) = toLower($name)" for p in self._name_props)
-        coalesce_m = "coalesce(" + ", ".join(f"m.{p}" for p in self._name_props) + ")"
-        coalesce_via = "coalesce(" + ", ".join(f"node.{p}" for p in self._name_props) + ")"
+        coalesce_m   = "coalesce(" + ", ".join(f"m.{p}" for p in self._name_props) + ")"
+        coalesce_via = "coalesce(" + ", ".join(f"intermediate.{p}" for p in self._name_props) + ")"
 
-        # Variable-length path query. `[*2..N]` returns only strictly multi-hop
-        # paths (we already have the 1-hop neighbors above). The WHERE clause
-        # restricts every edge in the path to schema-known types — that's the
-        # entire "chain definition" mechanism.
-        #
-        # Over-fetch is large (200) because dense edge types (e.g. `enables`
-        # with thousands of MF neighbors) can otherwise crowd out informative
-        # paths to less-connected target types. Python ranks + caps below.
-        cypher = (
-            f"MATCH (n) WHERE {match_clauses} "
-            "WITH n, labels(n)[0] AS source_label LIMIT 1 "
-            f"MATCH p = (n)-[*2..{int(max_depth)}]-(m) "
-            "WHERE m <> n "
-            "  AND all(r IN relationships(p) WHERE type(r) IN $allowed_edges) "
-            "WITH source_label, m, p, "
-            "     length(p)                                AS hops, "
-            "     [r IN relationships(p) | type(r)]        AS edge_types, "
-            "     [node IN nodes(p)[1..-1] | labels(node)[0]] AS via_labels, "
-            f"    [node IN nodes(p)[1..-1] | {coalesce_via}] AS via_names "
-            f"RETURN source_label, "
-            f"       labels(m)[0]  AS m_label, "
-            f"       {coalesce_m}   AS m_name, "
-            "       hops, edge_types, via_labels, via_names "
-            "LIMIT 200"
-        )
-        try:
-            with self._driver.session(database=self._database) as session:
-                rows = list(session.run(cypher, name=name, allowed_edges=allowed_edges))
-        except Exception:
+        # Per-first-edge cap: keeps each first-hop branch from monopolizing the
+        # over-fetch. With ~7 edge types this gives ~70 candidate paths total.
+        per_branch = max(5, limit)
+
+        all_rows: list = []
+        for first_edge in allowed_edges:
+            cypher = (
+                f"MATCH (n) WHERE {match_clauses} "
+                "WITH n, labels(n)[0] AS source_label LIMIT 1 "
+                f"MATCH (n)-[r1:`{first_edge}`]-(intermediate)-[r2]-(m) "
+                "WHERE m <> n "
+                "  AND type(r2) IN $allowed_edges "
+                f"RETURN source_label, "
+                f"       labels(m)[0]            AS m_label, "
+                f"       {coalesce_m}            AS m_name, "
+                f"       labels(intermediate)[0] AS via_label, "
+                f"       {coalesce_via}          AS via_name, "
+                f"       type(r1) AS first_edge, "
+                f"       type(r2) AS second_edge "
+                f"LIMIT {int(per_branch)}"
+            )
+            try:
+                with self._driver.session(database=self._database) as session:
+                    rows = list(session.run(cypher, name=name, allowed_edges=allowed_edges))
+                all_rows.extend(rows)
+            except Exception:
+                continue
+
+        if not all_rows:
             return []
 
-        if not rows:
-            return []
-
-        # Rank: cross-type paths first, then shorter, then target label.
-        source_label = rows[0]["source_label"]
+        # Rank: cross-type first, then alphabetical for stability.
+        source_label = all_rows[0]["source_label"]
         def _rank(r):
             same_type = 1 if r["m_label"] == source_label else 0
-            return (same_type, r["hops"], r["m_label"] or "")
-        rows.sort(key=_rank)
+            return (same_type, r["m_label"] or "", r["m_name"] or "")
+        all_rows.sort(key=_rank)
 
         # Dedupe by (target_label, target_name) and cap per target_label.
         per_label_cap = max(1, limit // 3)
         seen = set()
         per_label_count: dict = {}
         deduped = []
-        for r in rows:
+        for r in all_rows:
             key = (r["m_label"], r["m_name"])
             if key in seen:
                 continue
@@ -605,7 +611,19 @@ class Neo4jBackend:
             deduped.append(r)
             if len(deduped) >= limit:
                 break
-        return deduped
+
+        # Reshape for the existing formatter (which expects edge_types/via_labels/via_names lists).
+        return [
+            {
+                "m_label":    r["m_label"],
+                "m_name":     r["m_name"],
+                "hops":       2,
+                "edge_types": [r["first_edge"], r["second_edge"]],
+                "via_labels": [r["via_label"]],
+                "via_names":  [r["via_name"]],
+            }
+            for r in deduped
+        ]
 
     def query(self, cypher: str) -> str:
         try:
