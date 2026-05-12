@@ -527,7 +527,16 @@ class Neo4jBackend:
         """Return entities reachable from `name` via 2..max_depth hops, walking
         ONLY edges declared in the loaded schema. No hardcoded chain definitions
         — the schema's edge list is the allow-list; new edges added to the schema
-        automatically broaden reachability."""
+        automatically broaden reachability.
+
+        Ranking heuristic (avoids the "symmetric path explosion" failure mode):
+          1. Prefer paths whose TARGET LABEL ≠ source label (e.g. gene→...→protein
+             is more informative than gene→...→gene via shared annotations).
+          2. Within the same source/target label group, prefer shorter paths.
+          3. Cap results per target label so one dense type (genes sharing an
+             enables edge with the source via many MFs) can't drown out chains
+             to other types.
+        """
         if max_depth < 2 or self._schema is None:
             return []
         allowed_edges = list(self._schema.edges.keys())
@@ -542,38 +551,57 @@ class Neo4jBackend:
         # paths (we already have the 1-hop neighbors above). The WHERE clause
         # restricts every edge in the path to schema-known types — that's the
         # entire "chain definition" mechanism.
+        #
+        # Over-fetch is large (200) because dense edge types (e.g. `enables`
+        # with thousands of MF neighbors) can otherwise crowd out informative
+        # paths to less-connected target types. Python ranks + caps below.
         cypher = (
             f"MATCH (n) WHERE {match_clauses} "
-            "WITH n LIMIT 1 "
+            "WITH n, labels(n)[0] AS source_label LIMIT 1 "
             f"MATCH p = (n)-[*2..{int(max_depth)}]-(m) "
             "WHERE m <> n "
             "  AND all(r IN relationships(p) WHERE type(r) IN $allowed_edges) "
-            "WITH m, p, "
+            "WITH source_label, m, p, "
             "     length(p)                                AS hops, "
             "     [r IN relationships(p) | type(r)]        AS edge_types, "
             "     [node IN nodes(p)[1..-1] | labels(node)[0]] AS via_labels, "
             f"    [node IN nodes(p)[1..-1] | {coalesce_via}] AS via_names "
-            f"RETURN labels(m)[0]  AS m_label, "
+            f"RETURN source_label, "
+            f"       labels(m)[0]  AS m_label, "
             f"       {coalesce_m}   AS m_name, "
             "       hops, edge_types, via_labels, via_names "
-            "ORDER BY hops, m_label "
-            f"LIMIT {int(limit) * 3}"   # over-fetch then dedupe in Python
+            "LIMIT 200"
         )
         try:
             with self._driver.session(database=self._database) as session:
                 rows = list(session.run(cypher, name=name, allowed_edges=allowed_edges))
         except Exception:
-            # Fail soft — multi-hop is augmentation, not core.
             return []
 
-        # Dedupe by (target label, target name) — keep the shortest path for each.
+        if not rows:
+            return []
+
+        # Rank: cross-type paths first, then shorter, then target label.
+        source_label = rows[0]["source_label"]
+        def _rank(r):
+            same_type = 1 if r["m_label"] == source_label else 0
+            return (same_type, r["hops"], r["m_label"] or "")
+        rows.sort(key=_rank)
+
+        # Dedupe by (target_label, target_name) and cap per target_label.
+        per_label_cap = max(1, limit // 3)
         seen = set()
+        per_label_count: dict = {}
         deduped = []
         for r in rows:
             key = (r["m_label"], r["m_name"])
             if key in seen:
                 continue
             seen.add(key)
+            label = r["m_label"] or "?"
+            if per_label_count.get(label, 0) >= per_label_cap:
+                continue
+            per_label_count[label] = per_label_count.get(label, 0) + 1
             deduped.append(r)
             if len(deduped) >= limit:
                 break
