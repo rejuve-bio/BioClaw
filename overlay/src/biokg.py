@@ -514,7 +514,70 @@ class Neo4jBackend:
         if not rows:
             return f"No entity matching {name!r} found in BioKG (tried properties: {', '.join(self._name_props)})."
 
-        return self._format_lookup(name, rows)
+        # Multi-hop reachability — schema-derived, no hardcoded chains.
+        # Disabled if max_depth <= 1 (default 2). The schema's edge inventory
+        # is the only knob: any path made of schema-known edges is fair game.
+        max_depth = int(os.environ.get("BIOKG_LOOKUP_MAX_DEPTH", "2"))
+        multihop_limit = int(os.environ.get("BIOKG_LOOKUP_MULTIHOP_LIMIT", "10"))
+        multihop_rows = self._multihop_lookup(name, max_depth, multihop_limit) if max_depth >= 2 else []
+
+        return self._format_lookup(name, rows, multihop_rows)
+
+    def _multihop_lookup(self, name: str, max_depth: int, limit: int) -> list:
+        """Return entities reachable from `name` via 2..max_depth hops, walking
+        ONLY edges declared in the loaded schema. No hardcoded chain definitions
+        — the schema's edge list is the allow-list; new edges added to the schema
+        automatically broaden reachability."""
+        if max_depth < 2 or self._schema is None:
+            return []
+        allowed_edges = list(self._schema.edges.keys())
+        if not allowed_edges:
+            return []
+
+        match_clauses = " OR ".join(f"toLower(n.{p}) = toLower($name)" for p in self._name_props)
+        coalesce_m = "coalesce(" + ", ".join(f"m.{p}" for p in self._name_props) + ")"
+        coalesce_via = "coalesce(" + ", ".join(f"node.{p}" for p in self._name_props) + ")"
+
+        # Variable-length path query. `[*2..N]` returns only strictly multi-hop
+        # paths (we already have the 1-hop neighbors above). The WHERE clause
+        # restricts every edge in the path to schema-known types — that's the
+        # entire "chain definition" mechanism.
+        cypher = (
+            f"MATCH (n) WHERE {match_clauses} "
+            "WITH n LIMIT 1 "
+            f"MATCH p = (n)-[*2..{int(max_depth)}]-(m) "
+            "WHERE m <> n "
+            "  AND all(r IN relationships(p) WHERE type(r) IN $allowed_edges) "
+            "WITH m, p, "
+            "     length(p)                                AS hops, "
+            "     [r IN relationships(p) | type(r)]        AS edge_types, "
+            "     [node IN nodes(p)[1..-1] | labels(node)[0]] AS via_labels, "
+            f"    [node IN nodes(p)[1..-1] | {coalesce_via}] AS via_names "
+            f"RETURN labels(m)[0]  AS m_label, "
+            f"       {coalesce_m}   AS m_name, "
+            "       hops, edge_types, via_labels, via_names "
+            "ORDER BY hops, m_label "
+            f"LIMIT {int(limit) * 3}"   # over-fetch then dedupe in Python
+        )
+        try:
+            with self._driver.session(database=self._database) as session:
+                rows = list(session.run(cypher, name=name, allowed_edges=allowed_edges))
+        except Exception:
+            # Fail soft — multi-hop is augmentation, not core.
+            return []
+
+        # Dedupe by (target label, target name) — keep the shortest path for each.
+        seen = set()
+        deduped = []
+        for r in rows:
+            key = (r["m_label"], r["m_name"])
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(r)
+            if len(deduped) >= limit:
+                break
+        return deduped
 
     def query(self, cypher: str) -> str:
         try:
@@ -829,7 +892,7 @@ class Neo4jBackend:
 
         return f"Rejected [{staging_id}] (edge type {row['rel']}) — discarded."
 
-    def _format_lookup(self, name: str, rows: list) -> str:
+    def _format_lookup(self, name: str, rows: list, multihop_rows: Optional[list] = None) -> str:
         # Display names come from server-side coalesce; we just format here.
         first = rows[0]
         n_labels = first["n_labels"] or []
@@ -847,10 +910,23 @@ class Neo4jBackend:
             arrow = "->" if r.get("outgoing") else "<-"
             connections.append(f"  {arrow}[{rel}]{arrow[-1]} {m_name} ({m_kind})")
 
-        if not connections:
+        # Render multi-hop rows as their own block. Format: "[e1 → e2 ...]→ target (label, via X:y)".
+        indirect_lines = []
+        for r in (multihop_rows or []):
+            edges = r.get("edge_types") or []
+            via_labels = r.get("via_labels") or []
+            via_names = r.get("via_names") or []
+            via_pairs = ", ".join(f"{l}:{_short(n or '?')}" for l, n in zip(via_labels, via_names) if l)
+            path = " → ".join(edges) if edges else "?"
+            tgt_name = _short(r.get("m_name") or "?")
+            tgt_label = r.get("m_label") or "?"
+            via_part = f", via {via_pairs}" if via_pairs else ""
+            indirect_lines.append(f"  [{path}]→ {tgt_name} ({tgt_label}{via_part})")
+
+        if not connections and not indirect_lines:
             return f"Entity: {primary} ({kind}) — no connections in BioKG."
 
-        # Dedupe identical connections, cap at 60 lines
+        # Dedupe identical direct connections, cap at 60 lines
         seen = set()
         deduped = []
         for c in connections:
@@ -859,12 +935,17 @@ class Neo4jBackend:
                 deduped.append(c)
         truncated = ""
         if len(deduped) > 60:
-            truncated = f"\n  ... +{len(deduped)-60} more connections"
+            truncated = f"\n  ... +{len(deduped)-60} more direct connections"
             deduped = deduped[:60]
 
-        return (f"Entity: {primary} ({kind})\n"
-                f"Connections ({len(deduped)} shown):\n"
-                + "\n".join(deduped) + truncated)
+        out = (f"Entity: {primary} ({kind})\n"
+               f"Direct connections ({len(deduped)} shown):\n"
+               + "\n".join(deduped) + truncated)
+
+        if indirect_lines:
+            out += (f"\nIndirect connections via multi-hop schema paths ({len(indirect_lines)} shown):\n"
+                    + "\n".join(indirect_lines))
+        return out
 
 
 class MorkBackend:
