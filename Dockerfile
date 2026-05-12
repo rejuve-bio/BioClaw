@@ -25,8 +25,17 @@ COPY overlay/src/         /PeTTa/repos/OmegaClaw-Core/src/
 # Role-specific prompts + entrypoint wrapper. Live outside the memory volume
 # so they survive `docker compose down -v`. The entrypoint picks one based
 # on the BIOCLAW_PROMPT env var set per service in docker-compose.yml.
+#
+# Each prompt is COPY'd explicitly so adding a new role requires a deliberate
+# Dockerfile edit AND a new prompt file; missing prompt files would otherwise
+# silently fall back to the upstream OmegaClaw default.
 COPY overlay/specialist-prompt.txt   /opt/bioclaw/specialist-prompt.txt
 COPY overlay/conductor-prompt.txt    /opt/bioclaw/conductor-prompt.txt
+COPY overlay/query-prompt.txt        /opt/bioclaw/query-prompt.txt
+COPY overlay/annotation-prompt.txt   /opt/bioclaw/annotation-prompt.txt
+COPY overlay/relation-prompt.txt     /opt/bioclaw/relation-prompt.txt
+COPY overlay/provenance-prompt.txt   /opt/bioclaw/provenance-prompt.txt
+COPY overlay/explanation-prompt.txt  /opt/bioclaw/explanation-prompt.txt
 COPY overlay/bioclaw-entrypoint.sh   /opt/bioclaw/bioclaw-entrypoint.sh
 COPY overlay/config/                 /opt/bioclaw/config/
 RUN chmod +x /opt/bioclaw/bioclaw-entrypoint.sh
