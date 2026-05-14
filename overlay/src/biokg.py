@@ -1271,37 +1271,38 @@ class Neo4jBackend:
             citation = _clean_label("; ".join(b for b in citation_bits if b))
             sources.append((label, code, (f, c), citation))
 
-        header = f"PLN evidence merge for {s_label}:{s_name} -[{safe_edge_type}]-> {t_label}:{t_name}"
+        # Single-line output — weak LLMs hallucinate fake skill calls when
+        # they see multi-line text in their own RESULTS context. Until we
+        # patch upstream OmegaClaw's skill-result formatter to escape newlines
+        # (or run on a stronger LLM), keep skill outputs to one line.
+        head = f"PLN merge | {s_label}:{s_name} -{safe_edge_type}-> {t_label}:{t_name}"
 
         if len(sources) == 1:
             label, code, fc, citation = sources[0]
-            cite = f"  citation: {citation}" if citation else ""
+            cite = f" [{citation}]" if citation else ""
             return (
-                f"{header}:\n"
-                f"  single source — {label}: {_fmt_stv(fc)}\n"
-                f"{cite}\n"
-                f"  (no merging applied — one source only)"
-            ).rstrip()
+                f"{head} | single source: {label} {_fmt_stv(fc)}{cite} "
+                f"| no merging — one source only"
+            )
 
-        max_label_w = max(len(s[0]) for s in sources)
-        out = [header + ":"]
+        source_segs = []
         for label, code, fc, citation in sources:
-            cite = f"  [{citation}]" if citation else ""
-            out.append(f"  {label.ljust(max_label_w)}  -> {_fmt_stv(fc)}{cite}")
-        out.append("  " + "-" * (max_label_w + 22))
+            cite = f" [{citation}]" if citation else ""
+            source_segs.append(f"{label} {_fmt_stv(fc)}{cite}")
+        sources_str = " + ".join(source_segs)
 
         merged = _run_pln_merge([s[2] for s in sources])
         if merged is None:
-            out.append("  " + "merged".ljust(max_label_w) + "  -> (PLN invocation failed)")
-            return "\n".join(out)
+            return f"{head} | sources: {sources_str} | MERGE FAILED — PLN invocation error"
 
         f_m, c_m = merged
-        out.append("  " + "merged".ljust(max_label_w) + f"  -> {_fmt_stv(merged)}   via PLN revision (Truth_Revision)")
-        if c_m >= 0.5:
-            out.append(f"  (confidence {c_m:.3f} >= 0.5 ACT threshold — actionable)")
-        else:
-            out.append(f"  (confidence {c_m:.3f} < 0.5 ACT threshold — treat as hypothesis)")
-        return "\n".join(out)
+        act = "actionable" if c_m >= 0.5 else "below ACT 0.5 — hypothesize only"
+        cmp_op = ">=" if c_m >= 0.5 else "<"
+        return (
+            f"{head} | sources: {sources_str} "
+            f"| MERGED {_fmt_stv(merged)} via PLN revision "
+            f"| c={c_m:.3f} {cmp_op} ACT 0.5 -> {act}"
+        )
 
     def _format_lookup(self, name: str, rows: list, multihop_rows: Optional[list] = None) -> str:
         # Display names come from server-side coalesce; we just format here.
