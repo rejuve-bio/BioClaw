@@ -51,9 +51,10 @@ services:
       - relation-oc
       - provenance-oc
       - explanation-oc
+      - conflict-oc
     environment:
       <<: *common-env
-      BIOCLAW_PEERS: "query=http://query-oc:8080,annotation=http://annotation-oc:8080,relation=http://relation-oc:8080,provenance=http://provenance-oc:8080,explanation=http://explanation-oc:8080"
+      BIOCLAW_PEERS: "query=http://query-oc:8080,annotation=http://annotation-oc:8080,relation=http://relation-oc:8080,provenance=http://provenance-oc:8080,explanation=http://explanation-oc:8080,conflict=http://conflict-oc:8080"
       BIOCLAW_PROMPT: "conductor"
     command:
       - "commchannel=${COMMCHANNEL:-telegram}"
@@ -231,6 +232,37 @@ services:
       - /run:size=16m,mode=755
       - /var/tmp:size=64m,mode=1777
 
+  conflict-oc:
+    image: bioclaw:phase0
+    container_name: bioclaw-conflict-oc
+    init: true
+    tty: true
+    stdin_open: true
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      BIOCLAW_PROMPT: "conflict"
+    command:
+      - "commchannel=internal-rpc"
+      - "provider=${LLM_PROVIDER}"
+      - "embeddingprovider=${EMBED_PROVIDER}"
+      - "maxHistory=${SPECIALIST_MAX_HISTORY:-3000}"
+      - "maxFeedback=${SPECIALIST_MAX_FEEDBACK:-5000}"
+      # Reactive — reconciles evidence on request via PLN Truth_Revision.
+      # No background work; the PLN math is invoked synchronously by the
+      # biokg-pln-evidence-merge skill, which shells to /PeTTa/run.sh.
+      - "maxNewInputLoops=3"
+      - "maxWakeLoops=0"
+      - "wakeupInterval=86400"
+      - "RPC_ROLE=conflict"
+      - "RPC_PORT=8080"
+    volumes:
+      - conflict-memory:/PeTTa/repos/OmegaClaw-Core/memory
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /run:size=16m,mode=755
+      - /var/tmp:size=64m,mode=1777
+
 volumes:
   conductor-memory:
   query-memory:
@@ -238,3 +270,4 @@ volumes:
   relation-memory:
   provenance-memory:
   explanation-memory:
+  conflict-memory:

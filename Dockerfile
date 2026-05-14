@@ -36,6 +36,7 @@ COPY overlay/annotation-prompt.txt   /opt/bioclaw/annotation-prompt.txt
 COPY overlay/relation-prompt.txt     /opt/bioclaw/relation-prompt.txt
 COPY overlay/provenance-prompt.txt   /opt/bioclaw/provenance-prompt.txt
 COPY overlay/explanation-prompt.txt  /opt/bioclaw/explanation-prompt.txt
+COPY overlay/conflict-prompt.txt     /opt/bioclaw/conflict-prompt.txt
 COPY overlay/bioclaw-entrypoint.sh   /opt/bioclaw/bioclaw-entrypoint.sh
 COPY overlay/config/                 /opt/bioclaw/config/
 RUN chmod +x /opt/bioclaw/bioclaw-entrypoint.sh
