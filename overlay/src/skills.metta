@@ -54,6 +54,18 @@
     "- Count recent AUTONOMOUS proposals (edges staged by a specialist in idle wake-ups): biokg-recent-autonomous AGENT_NAME"
     "  Returns the count + sample IDs over the last hour. Autonomous specialists use this to self-rate-limit."
     "  Pass empty string for ALL agents. Example: biokg-recent-autonomous relation"
+    ;BIO KNOWLEDGE GRAPH (formal reasoning — PLN/NAL on the AtomSpace substrate):
+    "- Merge ALL evidence sources for an edge via PLN's Truth_Revision rule."
+    "  Format: biokg-pln-evidence-merge SOURCE_NAME|EDGE_TYPE|TARGET_NAME"
+    "  For every (SOURCE)-[EDGE_TYPE]->(TARGET) edge in BioKG, this assigns a"
+    "  (stv frequency confidence) per source (from GO evidence code or source"
+    "  token) and runs PLN revision to merge them into one belief. The math is"
+    "  deterministic — the same inputs always produce the same merged stv —"
+    "  and confidence grows strictly above the strongest single source when"
+    "  evidence agrees, drifts toward middle frequency when sources disagree."
+    "  Use whenever the user asks to reconcile, merge, or check contradictions"
+    "  among multiple sources for the same fact."
+    "  Example: biokg-pln-evidence-merge TP53|enables|nucleic acid binding"
     ;CODE EXECUTION:
     "- Execute MeTTa expression: metta sexpression"
     "Example to invoke Non-Axiomatic Logic via MeTTa: "
@@ -129,6 +141,9 @@
 
 (= (biokg-recent-autonomous $agent)
    (py-call (biokg.recent_autonomous $agent 3600)))
+
+(= (biokg-pln-evidence-merge $combined)
+   (py-call (biokg.pln_evidence_merge_pipe $combined)))
 
 !(import_prolog_functions_from_file (library OmegaClaw-Core ./src/skills.pl) (shell first_char))
 

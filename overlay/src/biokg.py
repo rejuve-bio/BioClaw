@@ -23,6 +23,9 @@ provenance fields (`_staged_by`, `_staged_at`, `_evidence`, `_confidence`,
 from "truth"). Reject = delete the edge. Same KG, no schema split.
 """
 import os
+import re
+import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -30,6 +33,154 @@ from typing import Any, Optional
 
 _lock = threading.Lock()
 _backend = None  # lazily constructed singleton
+
+# ─── Evidence → truth-value mapping (for PLN merge) ─────────────────────────
+# GO Consortium evidence codes → (frequency, confidence). Higher confidence
+# means stronger empirical/curatorial support. Reference:
+# http://geneontology.org/docs/guide-go-evidence-codes/
+EVIDENCE_CODE_STV: dict = {
+    # Experimental — high direct evidence
+    "EXP": (1.0, 0.92),
+    "IDA": (1.0, 0.92),
+    "IPI": (1.0, 0.88),
+    "IMP": (1.0, 0.87),
+    "IGI": (1.0, 0.85),
+    "IEP": (1.0, 0.65),
+    # High-throughput experimental
+    "HTP": (1.0, 0.70),
+    "HDA": (1.0, 0.78),
+    "HMP": (1.0, 0.78),
+    "HGI": (1.0, 0.78),
+    "HEP": (1.0, 0.70),
+    # Phylogenetic
+    "IBA": (1.0, 0.75),
+    "IBD": (1.0, 0.70),
+    "IKR": (1.0, 0.50),
+    "IRD": (1.0, 0.50),
+    # Computational
+    "ISS": (1.0, 0.55),
+    "ISO": (1.0, 0.55),
+    "ISA": (1.0, 0.50),
+    "ISM": (1.0, 0.50),
+    "RCA": (1.0, 0.55),
+    # Author / curator
+    "TAS": (1.0, 0.85),
+    "NAS": (1.0, 0.60),
+    "IC":  (1.0, 0.75),
+    # Electronic (most common, lowest confidence)
+    "IEA": (1.0, 0.50),
+    # No data
+    "ND":  (0.5, 0.10),
+}
+
+# Source-based stv used when no GO evidence code is recorded
+# (structural edges like transcribes_to, participates_in, etc.).
+SOURCE_STV: dict = {
+    "gencode":                  (1.0, 0.92),
+    "uniprot":                  (1.0, 0.90),
+    "reactome":                 (1.0, 0.85),
+    "gaf":                      (1.0, 0.70),
+    "agr":                      (1.0, 0.80),
+    "hpo":                      (1.0, 0.75),
+    "do":                       (1.0, 0.75),
+    "go":                       (1.0, 0.80),
+    "goa":                      (1.0, 0.70),
+    "gene ontology":            (1.0, 0.80),
+    "disease ontology":         (1.0, 0.75),
+    "human phenotype ontology": (1.0, 0.75),
+}
+
+DEFAULT_STV = (1.0, 0.50)
+
+
+def _evidence_stv(evidence_code: Optional[str], source: Optional[str]) -> tuple:
+    """Map (evidence_code, source) → (frequency, confidence). Evidence code wins
+    if recognized, else falls back to source-based, else DEFAULT_STV."""
+    if evidence_code:
+        code = str(evidence_code).strip().upper()
+        if code in EVIDENCE_CODE_STV:
+            return EVIDENCE_CODE_STV[code]
+    if source:
+        src = str(source).strip().lower()
+        if src in SOURCE_STV:
+            return SOURCE_STV[src]
+    return DEFAULT_STV
+
+
+def _fmt_stv(fc: tuple) -> str:
+    """Compact stv display: stv(F, C) with 3 decimals."""
+    f, c = fc
+    return f"stv({f:.3f}, {c:.3f})"
+
+
+def _run_pln_merge(stv_list: list) -> Optional[tuple]:
+    """Invoke MeTTa's Truth_Revision over a list of (f, c) stv pairs.
+
+    Writes a temp .metta file that imports lib_pln, defines a local `rev`
+    wrapper for Truth_Revision, and uses the OmegaClaw `test` framework to
+    force evaluation. Parses the printed `is (stv F C), should ?.` line.
+
+    Returns (f, c) of the merged result, or None on failure.
+    """
+    if not stv_list:
+        return None
+    if len(stv_list) == 1:
+        return stv_list[0]
+
+    # Left-fold: rev(rev(rev(s1,s2),s3),s4)…
+    def fold(stvs):
+        f0, c0 = stvs[0]
+        expr = f"(stv {f0} {c0})"
+        for f, c in stvs[1:]:
+            expr = f"(rev {expr} (stv {f} {c}))"
+        return expr
+
+    body = fold(stv_list)
+    metta_source = (
+        "!(import! &self (library lib_pln))\n"
+        "(: rev (-> Atom Atom Atom))\n"
+        "(= (rev $a $b) (Truth_Revision $a $b))\n"
+        f"!(test {body} (quote ?))\n"
+    )
+
+    try:
+        tf = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".metta", dir="/tmp", delete=False,
+        )
+        tf.write(metta_source)
+        tf.close()
+        path = tf.name
+    except Exception:
+        return None
+
+    try:
+        result = subprocess.run(
+            ["sh", "/PeTTa/run.sh", path],
+            cwd="/PeTTa",
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        output = (result.stdout or "") + "\n" + (result.stderr or "")
+    except Exception:
+        output = ""
+    finally:
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
+
+    matches = re.findall(
+        r"is \(stv\s+([0-9.eE+-]+)\s+([0-9.eE+-]+)\)\s*,\s*should",
+        output,
+    )
+    if not matches:
+        return None
+    last_f, last_c = matches[-1]
+    try:
+        return (float(last_f), float(last_c))
+    except ValueError:
+        return None
 
 # Lookup cache — entity name → (timestamp, formatted_result).
 # TTL via BIOKG_CACHE_TTL env (seconds, default 300). Set 0 to disable.
@@ -143,6 +294,23 @@ def recent_autonomous(agent: str = "", window_seconds: int = 3600) -> str:
     except (TypeError, ValueError):
         window = 3600
     return _get_backend().recent_autonomous(agent_norm, window)
+
+
+def pln_evidence_merge_pipe(combined: str) -> str:
+    """Single-arg form for the LLM. Format: SOURCE_NAME|EDGE_TYPE|TARGET_NAME
+
+    Pulls every (SOURCE)-[EDGE_TYPE]->(TARGET) edge from BioKG (including
+    staged proposals), assigns each source a truth value via _evidence_stv,
+    and runs PLN's Truth_Revision to merge them. Returns a human-readable
+    formatted block showing per-source stv and the merged result.
+    """
+    s = str(combined).strip().strip('"').strip("'").strip()
+    parts = [p.strip() for p in s.split("|")]
+    if len(parts) != 3:
+        return ("error: biokg-pln-evidence-merge format is SOURCE|EDGE_TYPE|TARGET.\n"
+                "Example: biokg-pln-evidence-merge TP53|enables|nucleic acid binding")
+    source, edge_type, target = parts[0], parts[1], parts[2]
+    return _get_backend().pln_evidence_merge(source, edge_type, target)
 
 
 # ─── BioCypher schema loader ────────────────────────────────────────────────
@@ -457,6 +625,9 @@ class DisabledBackend:
 
     def recent_autonomous(self, agent: str, window: int) -> str:
         return f"biokg unavailable ({self._reason}); cannot count proposals"
+
+    def pln_evidence_merge(self, source_name: str, edge_type: str, target_name: str) -> str:
+        return f"biokg unavailable ({self._reason}); cannot run PLN evidence merge"
 
 
 class Neo4jBackend:
@@ -1000,6 +1171,127 @@ class Neo4jBackend:
             return f"{total} autonomous proposal(s) by {agent} in last {window}s:\n" + "\n".join(out)
         return f"{total} autonomous proposal(s) in last {window}s, by agent:\n" + "\n".join(out)
 
+    def pln_evidence_merge(self, source_name: str, edge_type: str, target_name: str) -> str:
+        """Pull every edge of EDGE_TYPE from source_name → target_name, compute
+        per-source truth values, and merge them via PLN's Truth_Revision.
+
+        Endpoint resolution uses the same flexible name-property coalesce as
+        biokg-lookup. Both BioCypher-loaded edges (with source/evidence_code/
+        db_reference) and BioClaw-staged edges (with _staged_by/_confidence)
+        contribute to the merge.
+        """
+        safe_edge_type = "".join(c for c in str(edge_type).strip() if c.isalnum() or c == "_")
+        if not safe_edge_type:
+            return f"error: invalid edge_type {edge_type!r}"
+
+        src_clauses = " OR ".join(f"toLower(s.{p}) = toLower($src)" for p in self._name_props)
+        tgt_clauses = " OR ".join(f"toLower(t.{p}) = toLower($tgt)" for p in self._name_props)
+        coalesce_s = "coalesce(" + ", ".join(f"s.{p}" for p in self._name_props) + ")"
+        coalesce_t = "coalesce(" + ", ".join(f"t.{p}" for p in self._name_props) + ")"
+
+        cypher = (
+            f"MATCH (s) WHERE {src_clauses} WITH s LIMIT 1 "
+            f"MATCH (t) WHERE {tgt_clauses} WITH s, t LIMIT 1 "
+            f"MATCH (s)-[r:`{safe_edge_type}`]->(t) "
+            f"RETURN labels(s)[0]            AS s_label, {coalesce_s} AS s_name, "
+            f"       labels(t)[0]            AS t_label, {coalesce_t} AS t_name, "
+            "       r.source              AS source, "
+            "       r.evidence_code       AS evidence_code, "
+            "       r.db_reference        AS db_reference, "
+            "       r.reference           AS reference, "
+            "       r._staged_by          AS staged_by, "
+            "       r._evidence           AS staged_evidence, "
+            "       r._confidence         AS staged_confidence, "
+            "       r._status             AS status"
+        )
+        try:
+            with self._driver.session(database=self._database) as session:
+                rows = list(session.run(
+                    cypher,
+                    src=str(source_name).strip(),
+                    tgt=str(target_name).strip(),
+                ))
+        except Exception as exc:
+            return f"biokg neo4j error: {exc}"
+
+        if not rows:
+            return (f"No '{safe_edge_type}' edges found from {source_name!r} to "
+                    f"{target_name!r} in BioKG. (Either the entities don't exist "
+                    f"or no such edge has been recorded yet.)")
+
+        s_label = rows[0]["s_label"]
+        s_name = rows[0]["s_name"]
+        t_label = rows[0]["t_label"]
+        t_name = rows[0]["t_name"]
+
+        # One source per edge row.
+        sources = []  # list of (display_label, evidence_code, (f, c), citation)
+        for r in rows:
+            if r.get("staged_by"):
+                conf = r.get("staged_confidence")
+                try:
+                    conf = float(conf) if conf is not None else 0.7
+                except (TypeError, ValueError):
+                    conf = 0.7
+                status = r.get("status") or "promoted"
+                pending = ", pending" if status == "pending" else ""
+                label = f"{r['staged_by']} (BioClaw{pending})"
+                citation = r.get("staged_evidence") or ""
+                sources.append((label, "", (1.0, conf), citation))
+                continue
+
+            source = r.get("source") or ""
+            code = r.get("evidence_code") or ""
+            f, c = _evidence_stv(code, source)
+            if source and code:
+                label = f"{source} / {code}"
+            elif source:
+                label = source
+            elif code:
+                label = code
+            else:
+                label = "(no source recorded)"
+            citation_bits = []
+            if r.get("db_reference"):
+                citation_bits.append(_format_refs(r["db_reference"]))
+            if r.get("reference"):
+                citation_bits.append(_short(r["reference"], 60))
+            citation = "; ".join(b for b in citation_bits if b)
+            sources.append((label, code, (f, c), citation))
+
+        header = f"PLN evidence merge for ({s_label}:{s_name}) -[{safe_edge_type}]-> ({t_label}:{t_name})"
+
+        if len(sources) == 1:
+            label, code, fc, citation = sources[0]
+            cite = f"  citation: {citation}" if citation else ""
+            return (
+                f"{header}:\n"
+                f"  single source — {label}: {_fmt_stv(fc)}\n"
+                f"{cite}\n"
+                f"  (no merging applied — one source only)"
+            ).rstrip()
+
+        # Multi-source: build list lines, then invoke MeTTa Truth_Revision.
+        max_label_w = max(len(s[0]) for s in sources)
+        out = [header + ":"]
+        for label, code, fc, citation in sources:
+            cite = f"  [{citation}]" if citation else ""
+            out.append(f"  {label.ljust(max_label_w)}  → {_fmt_stv(fc)}{cite}")
+        out.append("  " + "─" * (max_label_w + 22))
+
+        merged = _run_pln_merge([s[2] for s in sources])
+        if merged is None:
+            out.append("  merged".ljust(max_label_w + 4) + "  → (PLN invocation failed; check /PeTTa/run.sh)")
+        else:
+            out.append("  " + "merged".ljust(max_label_w) + f"  → {_fmt_stv(merged)}   via PLN revision (Truth_Revision)")
+            # ACT-threshold annotation per reference-lib-nal docs.
+            _, c_m = merged
+            if c_m >= 0.5:
+                out.append(f"  (confidence {c_m:.3f} ≥ 0.5 ACT threshold — actionable)")
+            else:
+                out.append(f"  (confidence {c_m:.3f} < 0.5 ACT threshold — treat as hypothesis, corroborate)")
+        return "\n".join(out)
+
     def _format_lookup(self, name: str, rows: list, multihop_rows: Optional[list] = None) -> str:
         # Display names come from server-side coalesce; we just format here.
         first = rows[0]
@@ -1100,6 +1392,9 @@ class MorkBackend:
 
     def recent_autonomous(self, agent: str, window: int) -> str:
         return "biokg mork backend is not yet implemented; no autonomous-proposal tracking"
+
+    def pln_evidence_merge(self, source_name: str, edge_type: str, target_name: str) -> str:
+        return "biokg mork backend is not yet implemented; PLN merge unavailable"
 
 
 # ─── tiny helpers ───────────────────────────────────────────────────────────
