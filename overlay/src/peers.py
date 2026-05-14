@@ -60,7 +60,23 @@ def ask(role, query, timeout=_DEFAULT_TIMEOUT):
     reply = payload.get("reply", "")
     if not reply:
         return f"error: peer {role} returned empty reply"
+    # Flatten newlines to literal '\n' so the conductor's LLM sees a
+    # single-line string. Weak LLMs (Minimax) hallucinate fake nested skill
+    # calls when they see multi-line structure they have to relay. The IRC /
+    # Telegram channel adapter converts the '\n' literal back into real
+    # newlines on the way out (same convention as internal_rpc.send_message).
+    reply = _flatten_for_relay(reply)
     return f"[{role}-agent replied — relay this verbatim to the user with the send command]: {reply}"
+
+
+def _flatten_for_relay(text: str) -> str:
+    """Convert real newlines into the literal two-character sequence '\\n'
+    so the relayed string is single-line as far as the LLM is concerned.
+    Channel adapters convert it back to a real newline at the last mile."""
+    if not isinstance(text, str):
+        return text
+    # \r\n and \r first so we don't double-escape.
+    return text.replace("\r\n", "\\n").replace("\r", "\\n").replace("\n", "\\n")
 
 
 def ask_pipe(combined):

@@ -108,9 +108,20 @@ def _evidence_stv(evidence_code: Optional[str], source: Optional[str]) -> tuple:
 
 
 def _fmt_stv(fc: tuple) -> str:
-    """Compact stv display: stv(F, C) with 3 decimals."""
+    """Compact stv display: 'stv F/C' with 3 decimals.
+    No parens, no comma — keeps weak LLMs (Minimax) from misreading this as
+    a nested s-expression when they relay it via the `send` skill."""
     f, c = fc
-    return f"stv({f:.3f}, {c:.3f})"
+    return f"stv {f:.3f}/{c:.3f}"
+
+
+def _clean_label(s: str) -> str:
+    """Strip characters that break MeTTa-style s-expression relaying."""
+    return (str(s)
+            .replace("(", "[")
+            .replace(")", "]")
+            .replace(",", "")
+            .strip())
 
 
 def _run_pln_merge(stv_list: list) -> Optional[tuple]:
@@ -1234,9 +1245,9 @@ class Neo4jBackend:
                 except (TypeError, ValueError):
                     conf = 0.7
                 status = r.get("status") or "promoted"
-                pending = ", pending" if status == "pending" else ""
-                label = f"{r['staged_by']} (BioClaw{pending})"
-                citation = r.get("staged_evidence") or ""
+                pending = " pending" if status == "pending" else ""
+                label = _clean_label(f"{r['staged_by']}[BioClaw{pending}]")
+                citation = _clean_label(r.get("staged_evidence") or "")
                 sources.append((label, "", (1.0, conf), citation))
                 continue
 
@@ -1244,22 +1255,23 @@ class Neo4jBackend:
             code = r.get("evidence_code") or ""
             f, c = _evidence_stv(code, source)
             if source and code:
-                label = f"{source} / {code}"
+                label = f"{source}/{code}"
             elif source:
                 label = source
             elif code:
                 label = code
             else:
-                label = "(no source recorded)"
+                label = "no-source"
+            label = _clean_label(label)
             citation_bits = []
             if r.get("db_reference"):
                 citation_bits.append(_format_refs(r["db_reference"]))
             if r.get("reference"):
                 citation_bits.append(_short(r["reference"], 60))
-            citation = "; ".join(b for b in citation_bits if b)
+            citation = _clean_label("; ".join(b for b in citation_bits if b))
             sources.append((label, code, (f, c), citation))
 
-        header = f"PLN evidence merge for ({s_label}:{s_name}) -[{safe_edge_type}]-> ({t_label}:{t_name})"
+        header = f"PLN evidence merge for {s_label}:{s_name} -[{safe_edge_type}]-> {t_label}:{t_name}"
 
         if len(sources) == 1:
             label, code, fc, citation = sources[0]
@@ -1271,25 +1283,24 @@ class Neo4jBackend:
                 f"  (no merging applied — one source only)"
             ).rstrip()
 
-        # Multi-source: build list lines, then invoke MeTTa Truth_Revision.
         max_label_w = max(len(s[0]) for s in sources)
         out = [header + ":"]
         for label, code, fc, citation in sources:
             cite = f"  [{citation}]" if citation else ""
-            out.append(f"  {label.ljust(max_label_w)}  → {_fmt_stv(fc)}{cite}")
-        out.append("  " + "─" * (max_label_w + 22))
+            out.append(f"  {label.ljust(max_label_w)}  -> {_fmt_stv(fc)}{cite}")
+        out.append("  " + "-" * (max_label_w + 22))
 
         merged = _run_pln_merge([s[2] for s in sources])
         if merged is None:
-            out.append("  merged".ljust(max_label_w + 4) + "  → (PLN invocation failed; check /PeTTa/run.sh)")
+            out.append("  " + "merged".ljust(max_label_w) + "  -> (PLN invocation failed)")
+            return "\n".join(out)
+
+        f_m, c_m = merged
+        out.append("  " + "merged".ljust(max_label_w) + f"  -> {_fmt_stv(merged)}   via PLN revision (Truth_Revision)")
+        if c_m >= 0.5:
+            out.append(f"  (confidence {c_m:.3f} >= 0.5 ACT threshold — actionable)")
         else:
-            out.append("  " + "merged".ljust(max_label_w) + f"  → {_fmt_stv(merged)}   via PLN revision (Truth_Revision)")
-            # ACT-threshold annotation per reference-lib-nal docs.
-            _, c_m = merged
-            if c_m >= 0.5:
-                out.append(f"  (confidence {c_m:.3f} ≥ 0.5 ACT threshold — actionable)")
-            else:
-                out.append(f"  (confidence {c_m:.3f} < 0.5 ACT threshold — treat as hypothesis, corroborate)")
+            out.append(f"  (confidence {c_m:.3f} < 0.5 ACT threshold — treat as hypothesis)")
         return "\n".join(out)
 
     def _format_lookup(self, name: str, rows: list, multihop_rows: Optional[list] = None) -> str:
