@@ -132,6 +132,19 @@ def describe_source(source_key: str) -> str:
     return ds.describe(key)
 
 
+def recent_autonomous(agent: str = "", window_seconds: int = 3600) -> str:
+    """Return the count of staged proposals from a given agent whose evidence
+    starts with 'autonomous:' within the last `window_seconds`. Used by
+    autonomous specialists to self-rate-limit, and by ProvenanceOC/Conductor
+    to summarize background activity."""
+    agent_norm = str(agent).strip().strip('"').strip("'").strip()
+    try:
+        window = int(window_seconds)
+    except (TypeError, ValueError):
+        window = 3600
+    return _get_backend().recent_autonomous(agent_norm, window)
+
+
 # ─── BioCypher schema loader ────────────────────────────────────────────────
 # Parses a BioCypher schema_config.yaml (full or curated subset) and exposes:
 #   entities[label] = { name_prop, all_labels (incl. inherited) }
@@ -441,6 +454,9 @@ class DisabledBackend:
 
     def describe_source(self, key: str) -> str:
         return f"biokg unavailable ({self._reason}); no data-source registry"
+
+    def recent_autonomous(self, agent: str, window: int) -> str:
+        return f"biokg unavailable ({self._reason}); cannot count proposals"
 
 
 class Neo4jBackend:
@@ -938,6 +954,52 @@ class Neo4jBackend:
 
         return f"Rejected [{staging_id}] (edge type {row['rel']}) — discarded."
 
+    def recent_autonomous(self, agent: str, window: int) -> str:
+        """Count + brief-list staged/promoted edges whose evidence starts with
+        'autonomous:' inside the rolling window. If `agent` is empty, counts
+        across all agents and reports per-agent totals."""
+        # We match on _evidence STARTS WITH 'autonomous:' as the marker.
+        # Window: compare _staged_at (ISO 8601 string) >= now - window_seconds.
+        clauses = ["r._evidence IS NOT NULL",
+                   "toLower(r._evidence) STARTS WITH 'autonomous:'",
+                   "r._staged_at >= toString(datetime() - duration({seconds: $window}))"]
+        params: dict = {"window": int(window)}
+        if agent:
+            clauses.append("r._staged_by = $agent")
+            params["agent"] = agent
+
+        where = " AND ".join(clauses)
+        cypher = (
+            f"MATCH ()-[r]->() WHERE {where} "
+            "RETURN r._staged_by AS agent, count(r) AS n, "
+            "       collect(r._staging_id)[..3] AS sample_ids"
+        )
+        if not agent:
+            cypher += " ORDER BY n DESC"
+
+        try:
+            with self._driver.session(database=self._database) as session:
+                rows = list(session.run(cypher, **params))
+        except Exception as exc:
+            return f"biokg neo4j error counting autonomous proposals: {exc}"
+
+        if not rows or not any(r["n"] for r in rows):
+            label = f" by {agent}" if agent else ""
+            return f"0 autonomous proposals{label} in the last {window}s."
+
+        out = []
+        total = 0
+        for r in rows:
+            n = r["n"] or 0
+            if n == 0:
+                continue
+            total += n
+            samples = ", ".join(r["sample_ids"] or [])
+            out.append(f"  {r['agent']}: {n} (sample ids: {samples})")
+        if agent:
+            return f"{total} autonomous proposal(s) by {agent} in last {window}s:\n" + "\n".join(out)
+        return f"{total} autonomous proposal(s) in last {window}s, by agent:\n" + "\n".join(out)
+
     def _format_lookup(self, name: str, rows: list, multihop_rows: Optional[list] = None) -> str:
         # Display names come from server-side coalesce; we just format here.
         first = rows[0]
@@ -1035,6 +1097,9 @@ class MorkBackend:
 
     def describe_source(self, key: str) -> str:
         return "biokg mork backend is not yet implemented; no data-source registry"
+
+    def recent_autonomous(self, agent: str, window: int) -> str:
+        return "biokg mork backend is not yet implemented; no autonomous-proposal tracking"
 
 
 # ─── tiny helpers ───────────────────────────────────────────────────────────

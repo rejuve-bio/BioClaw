@@ -51,6 +51,9 @@
     "- Resolve a single BioCypher data-source token (e.g. 'gaf', 'GENCODE') into name + URL: biokg-source SOURCE_KEY"
     "  Use when you have a source string from a provenance result and want the canonical URL/version."
     "  Example: biokg-source gaf"
+    "- Count recent AUTONOMOUS proposals (edges staged by a specialist in idle wake-ups): biokg-recent-autonomous AGENT_NAME"
+    "  Returns the count + sample IDs over the last hour. Autonomous specialists use this to self-rate-limit."
+    "  Pass empty string for ALL agents. Example: biokg-recent-autonomous relation"
     ;CODE EXECUTION:
     "- Execute MeTTa expression: metta sexpression"
     "Example to invoke Non-Axiomatic Logic via MeTTa: "
@@ -123,6 +126,9 @@
 
 (= (biokg-source $key)
    (py-call (biokg.describe_source $key)))
+
+(= (biokg-recent-autonomous $agent)
+   (py-call (biokg.recent_autonomous $agent 3600)))
 
 !(import_prolog_functions_from_file (library OmegaClaw-Core ./src/skills.pl) (shell first_char))
 

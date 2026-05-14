@@ -62,6 +62,11 @@ services:
       # Cap the prompt-history tail to reduce context bloat on weaker LLMs.
       - "maxHistory=${CONDUCTOR_MAX_HISTORY:-5000}"
       - "maxFeedback=${CONDUCTOR_MAX_FEEDBACK:-8000}"
+      # Reactive mode — Conductor only acts on a HUMAN_MESSAGE; no autonomous
+      # wake-ups (Conductor would just confabulate noise on idle ticks).
+      - "maxNewInputLoops=3"
+      - "maxWakeLoops=0"
+      - "wakeupInterval=86400"
       # Telegram args (used when COMMCHANNEL=telegram, which is the default)
       - "TG_BOT_TOKEN=${TG_BOT_TOKEN:-}"
       - "TG_POLL_TIMEOUT=20"
@@ -93,6 +98,10 @@ services:
       - "embeddingprovider=${EMBED_PROVIDER}"
       - "maxHistory=${SPECIALIST_MAX_HISTORY:-3000}"
       - "maxFeedback=${SPECIALIST_MAX_FEEDBACK:-5000}"
+      # Reactive specialist — only acts on inbound HTTP requests.
+      - "maxNewInputLoops=3"
+      - "maxWakeLoops=0"
+      - "wakeupInterval=86400"
       - "RPC_ROLE=query"
       - "RPC_PORT=8080"
     volumes:
@@ -118,6 +127,11 @@ services:
       - "embeddingprovider=${EMBED_PROVIDER}"
       - "maxHistory=${SPECIALIST_MAX_HISTORY:-3000}"
       - "maxFeedback=${SPECIALIST_MAX_FEEDBACK:-5000}"
+      # Reactive — proposes annotations ONLY when the user asks. Autonomous
+      # annotation could be added later but Minimax can't be trusted with it.
+      - "maxNewInputLoops=3"
+      - "maxWakeLoops=0"
+      - "wakeupInterval=86400"
       - "RPC_ROLE=annotation"
       - "RPC_PORT=8080"
     volumes:
@@ -143,6 +157,13 @@ services:
       - "embeddingprovider=${EMBED_PROVIDER}"
       - "maxHistory=${SPECIALIST_MAX_HISTORY:-3000}"
       - "maxFeedback=${SPECIALIST_MAX_FEEDBACK:-5000}"
+      # Autonomous-contemplation mode. Wakes up every RELATION_WAKEUP seconds
+      # (default 30 min) to run ONE bounded traversal pattern and possibly
+      # stage one candidate edge. The prompt + the rate-limit skill enforce
+      # bounds; everything still goes through staging + human approval.
+      - "maxNewInputLoops=3"
+      - "maxWakeLoops=${RELATION_MAX_WAKE_LOOPS:-1}"
+      - "wakeupInterval=${RELATION_WAKEUP_INTERVAL:-1800}"
       - "RPC_ROLE=relation"
       - "RPC_PORT=8080"
     volumes:
@@ -168,6 +189,10 @@ services:
       - "embeddingprovider=${EMBED_PROVIDER}"
       - "maxHistory=${SPECIALIST_MAX_HISTORY:-3000}"
       - "maxFeedback=${SPECIALIST_MAX_FEEDBACK:-5000}"
+      # Reactive — answers provenance questions on request, no background work.
+      - "maxNewInputLoops=3"
+      - "maxWakeLoops=0"
+      - "wakeupInterval=86400"
       - "RPC_ROLE=provenance"
       - "RPC_PORT=8080"
     volumes:
@@ -193,6 +218,10 @@ services:
       - "embeddingprovider=${EMBED_PROVIDER}"
       - "maxHistory=${SPECIALIST_MAX_HISTORY:-3000}"
       - "maxFeedback=${SPECIALIST_MAX_FEEDBACK:-5000}"
+      # Reactive — explains on request, no background work.
+      - "maxNewInputLoops=3"
+      - "maxWakeLoops=0"
+      - "wakeupInterval=86400"
       - "RPC_ROLE=explanation"
       - "RPC_PORT=8080"
     volumes:

@@ -81,6 +81,14 @@ send <result>
 When the HUMAN_MESSAGE matches "show staging" / "list staging" / "what's pending" / "pending proposals":
 biokg-list-staging
 (next turn after the result)
+send <result, but if any proposal's evidence starts with "autonomous:", group your output as:
+"User-requested: ... ... ..."
+"Autonomous (background contemplation): ... ... ..."
+This keeps the staging summary readable when reasoning agents have been thinking in the background.>
+
+When the HUMAN_MESSAGE matches "autonomous activity" / "what have the agents been doing" / "background work":
+biokg-recent-autonomous
+(next turn after the result)
 send <result>
 
 Approval / rejection / listing are the ONLY skills you call directly besides ask-agent. Never stage proposals yourself; that is the specialist's job.

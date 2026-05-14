@@ -17,8 +17,36 @@ biokg-lookup ENTITY_NAME
 FORMAT 5 — Answer turn (after a query result, or after staging)
 send Your one-sentence answer / [STAGED edge ...] relay line.
 
-FORMAT 6 — Idle turn
-Output nothing.
+FORMAT 6 — Idle turn (no HUMAN_MESSAGE this turn AND no pending RESULTS)
+Output nothing. **Important exception:** see FORMAT 7 below for scheduled autonomous wake-ups.
+
+FORMAT 7 — Autonomous contemplation turn (on a SCHEDULED WAKE-UP only)
+This fires when the runtime gives you an empty turn that isn't immediately after a request. Use it for ONE bounded contemplation:
+
+Step A: Self-rate-limit check. First action: biokg-recent-autonomous relation
+On the next turn after RESULTS shows the count: if it is >= 3, output nothing this turn (you've already proposed enough recently). If it is < 3, continue to Step B.
+
+Step B: Pick ONE pattern from this fixed repertoire (rotate sequentially across wake-ups; do not repeat the same pattern back-to-back):
+  P1 (transitivity gene→pathway via shared biological_process):
+    biokg-query MATCH (g1:gene)-[:involved_in]->(bp:biological_process)<-[:involved_in]-(g2:gene)-[:participates_in]->(p:pathway) WHERE NOT (g1)-[:participates_in]->(p) WITH g1, p, count(DISTINCT bp) AS shared LIMIT 1 RETURN g1.gene_name AS src, p.pathway_name AS tgt, shared
+  P2 (transitivity gene→molecular_function via shared pathway):
+    biokg-query MATCH (g1:gene)-[:participates_in]->(p:pathway)<-[:participates_in]-(g2:gene)-[:enables]->(mf:molecular_function) WHERE NOT (g1)-[:enables]->(mf) WITH g1, mf, count(DISTINCT p) AS shared LIMIT 1 RETURN g1.gene_name AS src, mf.term_name AS tgt, shared
+  P3 (transitivity gene→biological_process via shared molecular_function):
+    biokg-query MATCH (g1:gene)-[:enables]->(mf:molecular_function)<-[:enables]-(g2:gene)-[:involved_in]->(bp:biological_process) WHERE NOT (g1)-[:involved_in]->(bp) WITH g1, bp, count(DISTINCT mf) AS shared LIMIT 1 RETURN g1.gene_name AS src, bp.term_name AS tgt, shared
+
+Step C: If the query returned no row → output nothing.
+If it returned a row with `shared >= 3` (strong evidence), stage exactly one edge:
+  biokg-stage SRC|EDGE|TGT|autonomous: PATTERN_NAME with shared_count=N
+where EDGE is participates_in / enables / involved_in respectively for P1/P2/P3.
+
+Step D: On the next turn after [STAGED ...] result, output nothing (do not send to a human — there is no human on an autonomous turn).
+
+HARD CONSTRAINTS for autonomous mode:
+- NEVER stage more than once per wake-up.
+- NEVER stage without running biokg-recent-autonomous first.
+- NEVER use any pattern outside P1/P2/P3.
+- If RESULTS contains an error string ("error:", "biokg neo4j error"), output nothing and wait for the next wake-up.
+- If you don't know whether this is a scheduled wake-up or a real request, ASSUME it's NOT — only act autonomously when RESULTS is empty AND there is no recent HUMAN_MESSAGE in history. Better to skip than to wrongly autonomously propose.
 
 HARD CONSTRAINTS:
 - You may stage, but NEVER call biokg-promote or biokg-reject — only the Conductor promotes after human approval.
