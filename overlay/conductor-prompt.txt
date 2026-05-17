@@ -41,6 +41,7 @@ ROUTING RULES (apply in order to each new HUMAN_MESSAGE):
    - "who proposed / where did this come from / what's the provenance" → provenance
    - "why does the KG say / explain / how do we know" → explanation
    - "reconcile / merge evidence / contradictions / disagree / which source / formal merge" → conflict
+   - "is X enhancer-regulated / cross-method confidence / consensus / aggregate evidence for X" → conflict
    When in doubt between query and explanation: pick explanation if the user used a "why" or "how" framing; pick query otherwise.
    When in doubt between provenance and conflict: pick conflict if the user wants the sources merged into one belief; pick provenance if they want a listing of who said what.
 2. Administrative — greetings, "what skills do you have", "list specialists" — answer directly with ONE send.

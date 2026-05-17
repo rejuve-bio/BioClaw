@@ -88,23 +88,82 @@ SOURCE_STV: dict = {
     "gene ontology":            (1.0, 0.80),
     "disease ontology":         (1.0, 0.75),
     "human phenotype ontology": (1.0, 0.75),
+    # Regulatory-region sources (enhancer–gene associations).
+    # Confidence reflects each method's curation depth, not absolute truth.
+    "peregrine":                (1.0, 0.80),  # multi-evidence curated links
+    "enhancer atlas":           (1.0, 0.65),  # tissue-specific predictions
+    "encode_re2g":              (1.0, 0.55),  # ML-predicted enhancer-gene
+    "ccre":                     (1.0, 0.60),  # candidate cis-regulatory elements
 }
 
 DEFAULT_STV = (1.0, 0.50)
 
 
-def _evidence_stv(evidence_code: Optional[str], source: Optional[str]) -> tuple:
-    """Map (evidence_code, source) → (frequency, confidence). Evidence code wins
-    if recognized, else falls back to source-based, else DEFAULT_STV."""
+def _evidence_stv(evidence_code: Optional[str], source: Optional[str],
+                  edge_confidence: Any = None, edge_score: Any = None) -> tuple:
+    """Map (evidence_code, source, edge_confidence, edge_score) → (frequency, confidence).
+
+    Priority order — most-specific wins:
+      1. edge_confidence ∈ [0, 1]  — empirical per-edge confidence from the source
+      2. edge_score (numeric)      — normalized per-source to [0, 1]
+      3. evidence_code             — GO Consortium reliability mapping
+      4. source token              — methodology baseline
+      5. DEFAULT_STV               — last resort
+    """
+    # 1. Per-edge confidence (already in [0, 1])
+    if edge_confidence is not None:
+        try:
+            c = float(edge_confidence)
+            if 0.0 <= c <= 1.0:
+                return (1.0, c)
+        except (TypeError, ValueError):
+            pass
+
+    # 2. Per-edge score — needs source-specific normalization
+    if edge_score is not None and source:
+        try:
+            s = float(edge_score)
+            c = _normalize_score(s, source)
+            if c is not None:
+                return (1.0, c)
+        except (TypeError, ValueError):
+            pass
+
+    # 3. GO Consortium evidence code
     if evidence_code:
         code = str(evidence_code).strip().upper()
         if code in EVIDENCE_CODE_STV:
             return EVIDENCE_CODE_STV[code]
+
+    # 4. Source baseline
     if source:
         src = str(source).strip().lower()
         if src in SOURCE_STV:
             return SOURCE_STV[src]
+
     return DEFAULT_STV
+
+
+def _normalize_score(score: float, source: str) -> Optional[float]:
+    """Source-specific score → confidence normalization. Returns None if the
+    source's score scale is unknown — caller then falls back to baseline."""
+    import math
+    src = str(source).strip().lower()
+    if src == "peregrine":
+        # PEREGRINE CDFscore is already [0, 1]. If score happens to be > 1,
+        # clamp; biologically the raw score column may also appear here.
+        return min(1.0, max(0.0, score))
+    if src in ("enhancer atlas", "enhanceratlas"):
+        # EnhancerAtlas conservation scores typically ~1–15. Sigmoid centered
+        # at 5 maps the bulk into [0.5, 0.95].
+        return 1.0 / (1.0 + math.exp(-(score - 5.0) / 3.0))
+    if src in ("encode_re2g", "encode"):
+        # ABC-style score already [0, 1].
+        return min(1.0, max(0.0, score))
+    if src == "ccre":
+        # cCRE inverse-distance — assume score is already a strength signal.
+        return min(1.0, max(0.0, score))
+    return None
 
 
 def _fmt_stv(fc: tuple) -> str:
@@ -322,6 +381,27 @@ def pln_evidence_merge_pipe(combined: str) -> str:
                 "Example: biokg-pln-evidence-merge TP53|enables|nucleic acid binding")
     source, edge_type, target = parts[0], parts[1], parts[2]
     return _get_backend().pln_evidence_merge(source, edge_type, target)
+
+
+def pln_source_aggregate_pipe(combined: str) -> str:
+    """Single-arg form. Format: TARGET_NAME|EDGE_TYPE
+
+    Cross-method consensus: for every edge of EDGE_TYPE incident to TARGET
+    (incoming OR outgoing), groups edges by `source`, computes per-source
+    mean confidence, then PLN-merges those per-source means.
+
+    Answers questions like "is GENE enhancer-regulated, integrating
+    PEREGRINE + Enhancer Atlas?" — where different methods catch different
+    specific edges (no per-edge overlap) but each method aggregates into a
+    method-level confidence about TARGET.
+    """
+    s = str(combined).strip().strip('"').strip("'").strip()
+    parts = [p.strip() for p in s.split("|")]
+    if len(parts) != 2:
+        return ("error: biokg-pln-source-aggregate format is TARGET_NAME|EDGE_TYPE.\n"
+                "Example: biokg-pln-source-aggregate BRCA1|associated_with")
+    target, edge_type = parts[0], parts[1]
+    return _get_backend().pln_source_aggregate(target, edge_type)
 
 
 # ─── BioCypher schema loader ────────────────────────────────────────────────
@@ -639,6 +719,9 @@ class DisabledBackend:
 
     def pln_evidence_merge(self, source_name: str, edge_type: str, target_name: str) -> str:
         return f"biokg unavailable ({self._reason}); cannot run PLN evidence merge"
+
+    def pln_source_aggregate(self, target_name: str, edge_type: str) -> str:
+        return f"biokg unavailable ({self._reason}); cannot run PLN source aggregate"
 
 
 class Neo4jBackend:
@@ -1208,6 +1291,9 @@ class Neo4jBackend:
             f"       labels(t)[0]            AS t_label, {coalesce_t} AS t_name, "
             "       r.source              AS source, "
             "       r.evidence_code       AS evidence_code, "
+            "       r.confidence          AS edge_confidence, "
+            "       r.score               AS edge_score, "
+            "       r.biological_context  AS biological_context, "
             "       r.db_reference        AS db_reference, "
             "       r.reference           AS reference, "
             "       r._staged_by          AS staged_by, "
@@ -1253,7 +1339,9 @@ class Neo4jBackend:
 
             source = r.get("source") or ""
             code = r.get("evidence_code") or ""
-            f, c = _evidence_stv(code, source)
+            edge_conf = r.get("edge_confidence")
+            edge_score = r.get("edge_score")
+            f, c = _evidence_stv(code, source, edge_confidence=edge_conf, edge_score=edge_score)
             if source and code:
                 label = f"{source}/{code}"
             elif source:
@@ -1264,6 +1352,8 @@ class Neo4jBackend:
                 label = "no-source"
             label = _clean_label(label)
             citation_bits = []
+            if r.get("biological_context"):
+                citation_bits.append(_clean_label(r["biological_context"]))
             if r.get("db_reference"):
                 citation_bits.append(_format_refs(r["db_reference"]))
             if r.get("reference"):
@@ -1301,6 +1391,99 @@ class Neo4jBackend:
         return (
             f"{head} | sources: {sources_str} "
             f"| MERGED {_fmt_stv(merged)} via PLN revision "
+            f"| c={c_m:.3f} {cmp_op} ACT 0.5 -> {act}"
+        )
+
+    def pln_source_aggregate(self, target_name: str, edge_type: str) -> str:
+        """Cross-source consensus for all edges of EDGE_TYPE incident to TARGET.
+
+        Use when:
+          - The same biological question is answered by multiple methods
+          - The methods produce different specific edges (no per-edge overlap)
+          - Per-method aggregate confidence is meaningful
+
+        Per-source summary = mean of per-edge confidence values. Then PLN
+        Truth_Revision merges those per-source means.
+        """
+        safe_edge_type = "".join(c for c in str(edge_type).strip() if c.isalnum() or c == "_")
+        if not safe_edge_type:
+            return f"error: invalid edge_type {edge_type!r}"
+
+        tgt_clauses = " OR ".join(f"toLower(t.{p}) = toLower($tgt)" for p in self._name_props)
+        coalesce_t = "coalesce(" + ", ".join(f"t.{p}" for p in self._name_props) + ")"
+
+        # Match edges incident to the target node (undirected — handles both
+        # incoming and outgoing). PLN-aggregation makes more sense for inbound
+        # edges to a target, but the undirected match is safer.
+        cypher = (
+            f"MATCH (t) WHERE {tgt_clauses} WITH t LIMIT 1 "
+            f"MATCH (s)-[r:`{safe_edge_type}`]-(t) "
+            f"RETURN labels(t)[0]            AS t_label, {coalesce_t} AS t_name, "
+            "       r.source              AS source, "
+            "       r.confidence          AS edge_confidence, "
+            "       r.score               AS edge_score, "
+            "       r.evidence_code       AS evidence_code"
+        )
+        try:
+            with self._driver.session(database=self._database) as session:
+                rows = list(session.run(cypher, tgt=str(target_name).strip()))
+        except Exception as exc:
+            return f"biokg neo4j error: {exc}"
+
+        if not rows:
+            return (f"No '{safe_edge_type}' edges incident to {target_name!r} in BioKG. "
+                    f"Check the entity name and edge type.")
+
+        t_label = rows[0]["t_label"]
+        t_name = rows[0]["t_name"]
+
+        # Group per-edge confidences by source token.
+        per_source: dict = {}
+        for r in rows:
+            src = r.get("source") or "(no-source)"
+            f, c = _evidence_stv(
+                r.get("evidence_code"), src,
+                edge_confidence=r.get("edge_confidence"),
+                edge_score=r.get("edge_score"),
+            )
+            per_source.setdefault(src, []).append(c)
+
+        header = f"PLN source-aggregate | {t_label}:{t_name} via {safe_edge_type}"
+
+        # No usable data — empty groups.
+        if not any(per_source.values()):
+            return f"{header} | no usable confidence values across {len(rows)} edges"
+
+        # Per-source summary segments.
+        src_segs = []
+        stvs = []
+        for src in sorted(per_source.keys()):
+            confs = per_source[src]
+            if not confs:
+                continue
+            mean_c = sum(confs) / len(confs)
+            cmax = max(confs)
+            clean_src = _clean_label(src)
+            src_segs.append(
+                f"{clean_src} n={len(confs)} mean={mean_c:.3f} max={cmax:.3f}"
+            )
+            stvs.append((1.0, mean_c))
+
+        sources_str = " + ".join(src_segs)
+
+        if len(stvs) == 1:
+            return f"{header} | {sources_str} | single source — no cross-source merge"
+
+        merged = _run_pln_merge(stvs)
+        if merged is None:
+            return f"{header} | {sources_str} | CROSS-SOURCE MERGE FAILED"
+
+        f_m, c_m = merged
+        act = "actionable" if c_m >= 0.5 else "below ACT 0.5 — hypothesize only"
+        cmp_op = ">=" if c_m >= 0.5 else "<"
+        return (
+            f"{header} | {sources_str} "
+            f"| CROSS-SOURCE MERGED {_fmt_stv(merged)} "
             f"| c={c_m:.3f} {cmp_op} ACT 0.5 -> {act}"
         )
 
@@ -1407,6 +1590,9 @@ class MorkBackend:
 
     def pln_evidence_merge(self, source_name: str, edge_type: str, target_name: str) -> str:
         return "biokg mork backend is not yet implemented; PLN merge unavailable"
+
+    def pln_source_aggregate(self, target_name: str, edge_type: str) -> str:
+        return "biokg mork backend is not yet implemented; PLN source aggregate unavailable"
 
 
 # ─── tiny helpers ───────────────────────────────────────────────────────────

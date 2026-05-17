@@ -66,6 +66,17 @@
     "  Use whenever the user asks to reconcile, merge, or check contradictions"
     "  among multiple sources for the same fact."
     "  Example: biokg-pln-evidence-merge TP53|enables|nucleic acid binding"
+    "- Cross-method consensus for a single TARGET: aggregate ALL edges of an"
+    "  edge type incident to TARGET, group by `source`, compute per-source mean"
+    "  confidence, then PLN-merge across sources."
+    "  Format: biokg-pln-source-aggregate TARGET_NAME|EDGE_TYPE"
+    "  Use when multiple methods answer the same biological question about a"
+    "  target but identify different specific edges (no per-edge overlap). For"
+    "  example: 'is BRCA1 enhancer-regulated, integrating PEREGRINE + Enhancer"
+    "  Atlas?' PEREGRINE finds proximal enhancers, EA finds distal — different"
+    "  edges but both methods say YES with quantifiable confidence. PLN merge"
+    "  produces one cross-method confidence number."
+    "  Example: biokg-pln-source-aggregate BRCA1|associated_with"
     ;CODE EXECUTION:
     "- Execute MeTTa expression: metta sexpression"
     "Example to invoke Non-Axiomatic Logic via MeTTa: "
@@ -144,6 +155,9 @@
 
 (= (biokg-pln-evidence-merge $combined)
    (py-call (biokg.pln_evidence_merge_pipe $combined)))
+
+(= (biokg-pln-source-aggregate $combined)
+   (py-call (biokg.pln_source_aggregate_pipe $combined)))
 
 !(import_prolog_functions_from_file (library OmegaClaw-Core ./src/skills.pl) (shell first_char))
 
