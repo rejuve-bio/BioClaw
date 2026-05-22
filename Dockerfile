@@ -31,12 +31,8 @@ COPY overlay/src/         /PeTTa/repos/OmegaClaw-Core/src/
 # silently fall back to the upstream OmegaClaw default.
 COPY overlay/specialist-prompt.txt   /opt/bioclaw/specialist-prompt.txt
 COPY overlay/conductor-prompt.txt    /opt/bioclaw/conductor-prompt.txt
-COPY overlay/query-prompt.txt        /opt/bioclaw/query-prompt.txt
-COPY overlay/annotation-prompt.txt   /opt/bioclaw/annotation-prompt.txt
-COPY overlay/relation-prompt.txt     /opt/bioclaw/relation-prompt.txt
-COPY overlay/provenance-prompt.txt   /opt/bioclaw/provenance-prompt.txt
-COPY overlay/explanation-prompt.txt  /opt/bioclaw/explanation-prompt.txt
-COPY overlay/conflict-prompt.txt     /opt/bioclaw/conflict-prompt.txt
+COPY overlay/assistant-prompt.txt    /opt/bioclaw/assistant-prompt.txt
+COPY overlay/reasoner-prompt.txt     /opt/bioclaw/reasoner-prompt.txt
 COPY overlay/bioclaw-entrypoint.sh   /opt/bioclaw/bioclaw-entrypoint.sh
 COPY overlay/config/                 /opt/bioclaw/config/
 RUN chmod +x /opt/bioclaw/bioclaw-entrypoint.sh

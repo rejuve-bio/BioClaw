@@ -1,4 +1,4 @@
-# BioClaw Phase 0 — Conductor + 2 specialists.
+# BioClaw — Phase 1: Conductor + AssistantOC + ReasonerOC.
 #
 # Bring up:    docker compose up -d
 # Logs (all):  docker compose logs -f
@@ -46,15 +46,11 @@ services:
     stdin_open: true
     restart: unless-stopped
     depends_on:
-      - query-oc
-      - annotation-oc
-      - relation-oc
-      - provenance-oc
-      - explanation-oc
-      - conflict-oc
+      - assistant-oc
+      - reasoner-oc
     environment:
       <<: *common-env
-      BIOCLAW_PEERS: "query=http://query-oc:8080,annotation=http://annotation-oc:8080,relation=http://relation-oc:8080,provenance=http://provenance-oc:8080,explanation=http://explanation-oc:8080,conflict=http://conflict-oc:8080"
+      BIOCLAW_PEERS: "assistant=http://assistant-oc:8080,reasoner=http://reasoner-oc:8080"
       BIOCLAW_PROMPT: "conductor"
     command:
       - "commchannel=${COMMCHANNEL:-telegram}"
@@ -65,7 +61,8 @@ services:
       - "maxFeedback=${CONDUCTOR_MAX_FEEDBACK:-8000}"
       # Reactive mode — Conductor only acts on a HUMAN_MESSAGE; no autonomous
       # wake-ups (Conductor would just confabulate noise on idle ticks).
-      - "maxNewInputLoops=3"
+      # maxNewInputLoops=1: process each new IRC message exactly once.
+      - "maxNewInputLoops=1"
       - "maxWakeLoops=0"
       - "wakeupInterval=86400"
       # Telegram args (used when COMMCHANNEL=telegram, which is the default)
@@ -83,181 +80,62 @@ services:
       - /run:size=16m,mode=755
       - /var/tmp:size=64m,mode=1777
 
-  query-oc:
+  assistant-oc:
     image: bioclaw:phase0
-    container_name: bioclaw-query-oc
+    container_name: bioclaw-assistant-oc
     init: true
     tty: true
     stdin_open: true
     restart: unless-stopped
     environment:
       <<: *common-env
-      BIOCLAW_PROMPT: "query"
+      BIOCLAW_PROMPT: "assistant"
     command:
       - "commchannel=internal-rpc"
       - "provider=${LLM_PROVIDER}"
       - "embeddingprovider=${EMBED_PROVIDER}"
       - "maxHistory=${SPECIALIST_MAX_HISTORY:-3000}"
       - "maxFeedback=${SPECIALIST_MAX_FEEDBACK:-5000}"
-      # Reactive specialist — only acts on inbound HTTP requests.
+      # Reactive specialist — biocurator-facing, no background work.
+      # Specialists need maxNewInputLoops>=2 so they can call a skill on turn 1
+      # and relay the result on turn 2.
       - "maxNewInputLoops=3"
       - "maxWakeLoops=0"
       - "wakeupInterval=86400"
-      - "RPC_ROLE=query"
+      - "RPC_ROLE=assistant"
       - "RPC_PORT=8080"
     volumes:
-      - query-memory:/PeTTa/repos/OmegaClaw-Core/memory
+      - assistant-memory:/PeTTa/repos/OmegaClaw-Core/memory
     tmpfs:
       - /tmp:size=64m,mode=1777
       - /run:size=16m,mode=755
       - /var/tmp:size=64m,mode=1777
 
-  annotation-oc:
+  reasoner-oc:
     image: bioclaw:phase0
-    container_name: bioclaw-annotation-oc
+    container_name: bioclaw-reasoner-oc
     init: true
     tty: true
     stdin_open: true
     restart: unless-stopped
     environment:
       <<: *common-env
-      BIOCLAW_PROMPT: "annotation"
+      BIOCLAW_PROMPT: "reasoner"
     command:
       - "commchannel=internal-rpc"
       - "provider=${LLM_PROVIDER}"
       - "embeddingprovider=${EMBED_PROVIDER}"
       - "maxHistory=${SPECIALIST_MAX_HISTORY:-3000}"
       - "maxFeedback=${SPECIALIST_MAX_FEEDBACK:-5000}"
-      # Reactive — proposes annotations ONLY when the user asks. Autonomous
-      # annotation could be added later but Minimax can't be trusted with it.
+      # Reactive — formal-reasoning compute on request. NAL / PLN subprocess
+      # via sh /PeTTa/run.sh runs synchronously inside the skill call.
       - "maxNewInputLoops=3"
       - "maxWakeLoops=0"
       - "wakeupInterval=86400"
-      - "RPC_ROLE=annotation"
+      - "RPC_ROLE=reasoner"
       - "RPC_PORT=8080"
     volumes:
-      - annotation-memory:/PeTTa/repos/OmegaClaw-Core/memory
-    tmpfs:
-      - /tmp:size=64m,mode=1777
-      - /run:size=16m,mode=755
-      - /var/tmp:size=64m,mode=1777
-
-  relation-oc:
-    image: bioclaw:phase0
-    container_name: bioclaw-relation-oc
-    init: true
-    tty: true
-    stdin_open: true
-    restart: unless-stopped
-    environment:
-      <<: *common-env
-      BIOCLAW_PROMPT: "relation"
-    command:
-      - "commchannel=internal-rpc"
-      - "provider=${LLM_PROVIDER}"
-      - "embeddingprovider=${EMBED_PROVIDER}"
-      - "maxHistory=${SPECIALIST_MAX_HISTORY:-3000}"
-      - "maxFeedback=${SPECIALIST_MAX_FEEDBACK:-5000}"
-      # Autonomous-contemplation mode. Wakes up every RELATION_WAKEUP seconds
-      # (default 30 min) to run ONE bounded traversal pattern and possibly
-      # stage one candidate edge. The prompt + the rate-limit skill enforce
-      # bounds; everything still goes through staging + human approval.
-      - "maxNewInputLoops=3"
-      - "maxWakeLoops=${RELATION_MAX_WAKE_LOOPS:-1}"
-      - "wakeupInterval=${RELATION_WAKEUP_INTERVAL:-1800}"
-      - "RPC_ROLE=relation"
-      - "RPC_PORT=8080"
-    volumes:
-      - relation-memory:/PeTTa/repos/OmegaClaw-Core/memory
-    tmpfs:
-      - /tmp:size=64m,mode=1777
-      - /run:size=16m,mode=755
-      - /var/tmp:size=64m,mode=1777
-
-  provenance-oc:
-    image: bioclaw:phase0
-    container_name: bioclaw-provenance-oc
-    init: true
-    tty: true
-    stdin_open: true
-    restart: unless-stopped
-    environment:
-      <<: *common-env
-      BIOCLAW_PROMPT: "provenance"
-    command:
-      - "commchannel=internal-rpc"
-      - "provider=${LLM_PROVIDER}"
-      - "embeddingprovider=${EMBED_PROVIDER}"
-      - "maxHistory=${SPECIALIST_MAX_HISTORY:-3000}"
-      - "maxFeedback=${SPECIALIST_MAX_FEEDBACK:-5000}"
-      # Reactive — answers provenance questions on request, no background work.
-      - "maxNewInputLoops=3"
-      - "maxWakeLoops=0"
-      - "wakeupInterval=86400"
-      - "RPC_ROLE=provenance"
-      - "RPC_PORT=8080"
-    volumes:
-      - provenance-memory:/PeTTa/repos/OmegaClaw-Core/memory
-    tmpfs:
-      - /tmp:size=64m,mode=1777
-      - /run:size=16m,mode=755
-      - /var/tmp:size=64m,mode=1777
-
-  explanation-oc:
-    image: bioclaw:phase0
-    container_name: bioclaw-explanation-oc
-    init: true
-    tty: true
-    stdin_open: true
-    restart: unless-stopped
-    environment:
-      <<: *common-env
-      BIOCLAW_PROMPT: "explanation"
-    command:
-      - "commchannel=internal-rpc"
-      - "provider=${LLM_PROVIDER}"
-      - "embeddingprovider=${EMBED_PROVIDER}"
-      - "maxHistory=${SPECIALIST_MAX_HISTORY:-3000}"
-      - "maxFeedback=${SPECIALIST_MAX_FEEDBACK:-5000}"
-      # Reactive — explains on request, no background work.
-      - "maxNewInputLoops=3"
-      - "maxWakeLoops=0"
-      - "wakeupInterval=86400"
-      - "RPC_ROLE=explanation"
-      - "RPC_PORT=8080"
-    volumes:
-      - explanation-memory:/PeTTa/repos/OmegaClaw-Core/memory
-    tmpfs:
-      - /tmp:size=64m,mode=1777
-      - /run:size=16m,mode=755
-      - /var/tmp:size=64m,mode=1777
-
-  conflict-oc:
-    image: bioclaw:phase0
-    container_name: bioclaw-conflict-oc
-    init: true
-    tty: true
-    stdin_open: true
-    restart: unless-stopped
-    environment:
-      <<: *common-env
-      BIOCLAW_PROMPT: "conflict"
-    command:
-      - "commchannel=internal-rpc"
-      - "provider=${LLM_PROVIDER}"
-      - "embeddingprovider=${EMBED_PROVIDER}"
-      - "maxHistory=${SPECIALIST_MAX_HISTORY:-3000}"
-      - "maxFeedback=${SPECIALIST_MAX_FEEDBACK:-5000}"
-      # Reactive — reconciles evidence on request via PLN Truth_Revision.
-      # No background work; the PLN math is invoked synchronously by the
-      # biokg-pln-evidence-merge skill, which shells to /PeTTa/run.sh.
-      - "maxNewInputLoops=3"
-      - "maxWakeLoops=0"
-      - "wakeupInterval=86400"
-      - "RPC_ROLE=conflict"
-      - "RPC_PORT=8080"
-    volumes:
-      - conflict-memory:/PeTTa/repos/OmegaClaw-Core/memory
+      - reasoner-memory:/PeTTa/repos/OmegaClaw-Core/memory
     tmpfs:
       - /tmp:size=64m,mode=1777
       - /run:size=16m,mode=755
@@ -265,9 +143,5 @@ services:
 
 volumes:
   conductor-memory:
-  query-memory:
-  annotation-memory:
-  relation-memory:
-  provenance-memory:
-  explanation-memory:
-  conflict-memory:
+  assistant-memory:
+  reasoner-memory:
