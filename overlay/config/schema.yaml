@@ -178,6 +178,37 @@ disease:
   kgx_properties:
     category: "biolink:Disease"
 
+# Regulatory regions — ingested from PEREGRINE + EnhancerAtlas (etc.).
+# Both adapters use coordinate-based IDs (CHRx_start_end_GRCH38) so the same
+# genomic region from different sources MERGEs into one node automatically.
+enhancer:
+  represented_as: node
+  input_label: enhancer
+  is_a: non coding element
+  mixins: [biolink:RegulatoryRegion]
+  biolink_category: "biolink:RegulatoryRegion"
+  inherit_properties: true
+  kgx_properties:
+    category: "biolink:RegulatoryRegion"
+  properties:
+    enhancer_id:
+      type: str
+      biolink: id
+    chr:
+      type: str
+    start:
+      type: int
+    end:
+      type: int
+    data_source:
+      type: str
+    source:
+      type: str
+      biolink: knowledge_source
+    source_url:
+      type: str
+      biolink: source_web_page
+
 # ─── Edges loaded today ─────────────────────────────────────────────────────
 transcribes to:
   represented_as: edge
@@ -269,6 +300,39 @@ cellular component gene located in:
     object_category: "biolink:CellularComponent"
     knowledge_level: "knowledge_assertion"
     agent_type: "manual_agent"
+
+enhancer to gene association:
+  description: >-
+    An association between an enhancer and a gene.
+  is_a: regulatory association
+  mixins: [biolink:Association]
+  biolink_predicate: "biolink:associated_with"
+  inherit_properties: true
+  represented_as: edge
+  input_label: enhancer_gene
+  output_label: associated_with
+  source: enhancer
+  target: gene
+  kgx_properties:
+    subject_category: "biolink:RegulatoryRegion"
+    object_category: "biolink:Gene"
+    knowledge_level: "knowledge_assertion"
+    agent_type: "manual_agent"
+  properties:
+    score:
+      type: float
+      biolink: has_quantitative_value
+    confidence:
+      type: float
+      biolink: has_quantitative_value
+    biological_context:
+      type: str
+    source:
+      type: str
+      biolink: knowledge_source
+    source_url:
+      type: str
+      biolink: source_web_page
 
 gene is implicated in disease:
   description: >-
