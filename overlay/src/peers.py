@@ -8,7 +8,7 @@ import os
 import urllib.error
 import urllib.request
 
-_DEFAULT_TIMEOUT = 180
+_DEFAULT_TIMEOUT = 60
 
 
 def _peers():
@@ -49,17 +49,23 @@ def ask(role, query, timeout=_DEFAULT_TIMEOUT):
         with urllib.request.urlopen(req, timeout=float(timeout) + 10) as resp:
             payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
     except urllib.error.HTTPError as exc:
-        try:
-            detail = exc.read().decode("utf-8", errors="ignore")
-        except Exception:
-            detail = str(exc)
-        return f"error: peer {role} returned HTTP {exc.code}: {detail[:400]}"
+        # 504 typically means the specialist's LLM didn't produce a clean reply
+        # in time. Wrap as a relay-tagged message so the conductor's prompt knows
+        # to forward it to the user (otherwise the bare "error:" string gets
+        # dropped and the user sees nothing).
+        if exc.code == 504:
+            user_msg = f"Sorry, {role} took too long to respond. Please try the question again."
+        else:
+            user_msg = f"Sorry, {role} returned an error (HTTP {exc.code}). Please try again."
+        return f"[{role}-agent replied — relay this verbatim to the user with the send command]: {user_msg}"
     except (urllib.error.URLError, TimeoutError) as exc:
-        return f"error: could not reach peer {role}: {exc}"
+        user_msg = f"Sorry, could not reach {role}. Please try again in a moment."
+        return f"[{role}-agent replied — relay this verbatim to the user with the send command]: {user_msg}"
 
     reply = payload.get("reply", "")
     if not reply:
-        return f"error: peer {role} returned empty reply"
+        user_msg = f"Sorry, {role} returned an empty reply. Please try again."
+        return f"[{role}-agent replied — relay this verbatim to the user with the send command]: {user_msg}"
     # Flatten newlines to literal '\n' so the conductor's LLM sees a
     # single-line string. Weak LLMs (Minimax) hallucinate fake nested skill
     # calls when they see multi-line structure they have to relay. The IRC /

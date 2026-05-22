@@ -110,7 +110,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(400, {"error": "missing 'text'"})
             return
 
-        timeout = float(payload.get("timeout", 180))
+        timeout = float(payload.get("timeout", 60))
 
         slot = _ResponseSlot()
         # Tag with role so the agent prompt sees it as a peer call
@@ -119,6 +119,10 @@ class _Handler(BaseHTTPRequestHandler):
 
         reply = slot.wait(timeout=timeout)
         if not reply:
+            # Force-finalize so the agent's eventual late response doesn't
+            # pollute the next /ask. If this slot is the in-flight one,
+            # this clears _current_response too.
+            _finalize_current()
             self._json(504, {"error": "agent did not respond in time"})
             return
         self._json(200, {"reply": reply, "role": _role})
