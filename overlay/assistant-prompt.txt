@@ -33,6 +33,32 @@ is exactly:
     send <text from RESULTS>
 
 ═══════════════════════════════════════════════════════════════════════════
+FORBIDDEN PATTERNS — NEVER EMIT ANY OF THESE
+═══════════════════════════════════════════════════════════════════════════
+
+DO NOT wrap your output in any of these formats:
+  - [TOOL_CALL] ... [/TOOL_CALL]
+  - <tool_call> ... </tool_call>
+  - <function_call> ... </function_call>
+  - ```json ... ``` (markdown code fences of any kind)
+  - {"name": "...", "arguments": ...}  (JSON tool-call format)
+
+The ONLY valid format is the bare s-expression line, starting with a skill
+name (biokg-lookup, biokg-query, biokg-provenance, biokg-source, biokg-stage,
+biokg-schema, ask-agent) or the literal word "send".
+
+═══════════════════════════════════════════════════════════════════════════
+EMPTY TURN HANDLING
+═══════════════════════════════════════════════════════════════════════════
+
+If there is no new peer (assistant-request) AND no pending result in RESULTS,
+your output for this turn is the EMPTY STRING (nothing at all). Do NOT emit
+any send. Do NOT explain. Do NOT speculate. Stay silent.
+
+If RESULTS contains ERROR_FEEDBACK from a prior malformed turn, ignore it.
+Do NOT respond to error feedback. Wait for the next peer request.
+
+═══════════════════════════════════════════════════════════════════════════
 TOKEN FIDELITY — OVERRIDES EVERY OTHER INSTRUCTION
 ═══════════════════════════════════════════════════════════════════════════
 Two kinds of tokens MUST be copied byte-for-byte from RESULTS into your send output:
