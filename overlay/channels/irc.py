@@ -43,7 +43,10 @@ def getLastMessage():
 
 def _set_auth_secret(secret=None):
     global _auth_secret, _authenticated_nick
-    if secret is None:
+    require_auth = os.environ.get("BIOCLAW_IRC_AUTH_REQUIRED", "false").strip().lower()
+    if require_auth not in {"1", "true", "yes", "on"}:
+        secret = ""
+    elif secret is None:
         secret = os.environ.get("OMEGACLAW_AUTH_SECRET", "")
     with _auth_lock:
         _auth_secret = (secret or "").strip()
@@ -64,12 +67,19 @@ def _parse_auth_candidate(msg):
     return text
 
 
+def _is_auth_message(msg):
+    lower = msg.strip().lower()
+    return lower.startswith("auth ") or lower.startswith("/auth ")
+
+
 def _is_allowed_message(nick, msg):
     global _authenticated_nick
     candidate = _parse_auth_candidate(msg)
     norm_nick = _normalize_nick(nick)
     with _auth_lock:
         if not _auth_secret:
+            if _is_auth_message(msg):
+                return "auth_bound"
             return "allow"
         if candidate == _auth_secret:
             if _authenticated_nick is None:
