@@ -164,6 +164,42 @@ def _is_known_skill_call(first_token: str) -> bool:
     return False
 
 
+# Spam patterns: bare echoes of system control text the agent should never
+# parrot back to the user.
+_SPAM_PATTERNS = [
+    re.compile(r"^DO\s+NOT\s+RE-SEND\s+OR\s+SPAM!?$", re.IGNORECASE),
+    re.compile(r"^SINGLE_COMMAND_FORMAT_ERROR", re.IGNORECASE),
+    re.compile(r"^ERROR_FEEDBACK:", re.IGNORECASE),
+    re.compile(r"^HUMAN_MESSAGE:", re.IGNORECASE),
+    re.compile(r"^LAST_SKILL_USE_RESULTS:", re.IGNORECASE),
+]
+
+# Internal-monologue starters — the LLM thinking out loud rather than producing
+# user-facing content. Drop sends that begin with these.
+_MONOLOGUE_STARTS = (
+    "i should ",
+    "i need to ",
+    "i will ",
+    "let me ",
+    "looking at ",
+    "based on the ",
+    "according to ",
+    "the instruction ",
+    "now i need to",
+    "since the ",
+)
+
+
+def _looks_like_monologue(text: str) -> bool:
+    lower = text.lstrip('"\' ').lower()
+    return any(lower.startswith(p) for p in _MONOLOGUE_STARTS)
+
+
+def _looks_like_spam(text: str) -> bool:
+    stripped = text.strip().strip('"').strip("'").strip()
+    return any(p.match(stripped) for p in _SPAM_PATTERNS)
+
+
 def sanitize_llm_response(raw: str) -> str:
     """Strip wrapper bleed and auto-wrap orphan prose. See module docstring."""
     if not isinstance(raw, str):
@@ -176,7 +212,13 @@ def sanitize_llm_response(raw: str) -> str:
     for pat, repl in _WRAPPER_PATTERNS:
         text = pat.sub(repl, text)
 
-    # 3. Process line-by-line
+    # 3. Process line-by-line, tracking how many `send` lines we've kept so
+    #    that we can enforce the "ONE send per turn" rule at runtime. The
+    #    LLM is repeatedly told this in the prompt but Minimax violates it
+    #    on long histories, producing spam cascades where the same answer
+    #    is restated 3-5 times. Hard-capping here makes the rule enforced
+    #    rather than aspirational.
+    send_count = 0
     out_lines = []
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -200,14 +242,33 @@ def sanitize_llm_response(raw: str) -> str:
         first = first.strip('"').strip("'")
 
         if _is_known_skill_call(first):
-            # Looks like a real skill call — pass through unchanged
+            # Looks like a real skill call. Special-case `send`: enforce the
+            # "ONE send per turn" rule and drop spam/monologue patterns.
+            if first == "send":
+                # Extract the send body for spam/monologue checks
+                body = parts[1].strip() if len(parts) > 1 else ""
+                # Strip surrounding quotes for inspection
+                body_inspect = body.strip('"').strip("'").strip()
+                if _looks_like_spam(body_inspect):
+                    continue   # drop echoed system warnings
+                if _looks_like_monologue(body_inspect):
+                    continue   # drop LLM internal-monologue commentary
+                send_count += 1
+                if send_count > 1:
+                    continue   # already emitted one send this turn — drop the rest
             out_lines.append(raw_line)
         else:
             # Orphan prose. Auto-wrap as send so the user sees the content
             # instead of nothing. Strip a leading list-marker like "-" or "*".
             cleaned = inner.lstrip("-*").strip()
-            if cleaned:
-                out_lines.append(f"send {cleaned}")
+            if not cleaned:
+                continue
+            if _looks_like_spam(cleaned) or _looks_like_monologue(cleaned):
+                continue   # don't auto-wrap monologue or echoed warnings
+            send_count += 1
+            if send_count > 1:
+                continue   # cap at one auto-wrapped send per turn
+            out_lines.append(f"send {cleaned}")
 
     return "\n".join(out_lines)
 
@@ -310,14 +371,38 @@ def test_balance_parenthesis():
     assert balance_parentheses('(empty)') == '()'
     # 5. markdown code fences are stripped
     assert balance_parentheses('```\nsend hi\n```') == '((send "hi"))'
-    # 6. multiple lines: send + orphan prose
+    # 6. multiple lines: only first send kept (one-send-per-turn rule)
     out = balance_parentheses('send Working on it\nResponse arrived')
-    assert out == '((send "Working on it") (send "Response arrived"))'
+    assert out == '((send "Working on it"))', f"got: {out}"
     # 7. biokg-* skill is recognized (forward-compat)
     assert balance_parentheses('biokg-lookup TP53') == '((biokg-lookup "TP53"))'
     # 8. ask-agent stays intact
     assert balance_parentheses('ask-agent assistant|What does TP53 do?') == \
         '((ask-agent "assistant|What does TP53 do?"))'
+
+    # 9. Multiple sends in one turn: keep first, drop the rest
+    multi_send = balance_parentheses('send First answer\nsend Second answer\nsend Third answer')
+    assert multi_send == '((send "First answer"))', f"got: {multi_send}"
+
+    # 10. send + ask-agent in same turn: both pass (different skill names)
+    pair = balance_parentheses('send Working on it\nask-agent assistant|What does TP53 do?')
+    assert pair == '((send "Working on it") (ask-agent "assistant|What does TP53 do?"))', f"got: {pair}"
+
+    # 11. Spam pattern: echoed system warning gets dropped
+    spam = balance_parentheses('send DO NOT RE-SEND OR SPAM!')
+    assert spam == '()', f"got: {spam}"
+
+    # 12. Monologue: LLM internal reasoning gets dropped
+    mono = balance_parentheses('send I should query for disease connections explicitly:')
+    assert mono == '()', f"got: {mono}"
+
+    # 13. Orphan prose monologue: also dropped
+    orphan_mono = balance_parentheses('Looking at the LAST_SKILL_USE_RESULTS, the query returned no rows.')
+    assert orphan_mono == '()', f"got: {orphan_mono}"
+
+    # 14. Multiple auto-wrapped orphan prose: cap at one
+    multi_orphan = balance_parentheses('First sentence.\nSecond sentence.\nThird sentence.')
+    assert multi_orphan == '((send "First sentence."))', f"got: {multi_orphan}"
 
 
 if __name__ == "__main__":
