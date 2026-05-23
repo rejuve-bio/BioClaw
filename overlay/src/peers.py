@@ -8,7 +8,12 @@ import os
 import urllib.error
 import urllib.request
 
-_DEFAULT_TIMEOUT = 60
+
+def _default_timeout():
+    try:
+        return float(os.environ.get("BIOCLAW_PEER_TIMEOUT", "180"))
+    except (TypeError, ValueError):
+        return 180.0
 
 
 def _peers():
@@ -23,10 +28,12 @@ def _peers():
     return out
 
 
-def ask(role, query, timeout=_DEFAULT_TIMEOUT):
+def ask(role, query, timeout=None):
     """Synchronously ask a peer specialist agent and return its reply text."""
     role = str(role).strip().lower()
     query = str(query).strip()
+    if timeout is None:
+        timeout = _default_timeout()
     if not role:
         return "error: role is required"
     if not query:
