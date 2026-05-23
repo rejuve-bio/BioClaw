@@ -138,6 +138,9 @@ _DROP_LINE_PATTERNS = [
     re.compile(r"^\s*\{\s*\}\s*$"),                            # {}
     re.compile(r"^\s*\[\s*\]\s*$"),                            # []
     re.compile(r"^\s*\(\s*\)\s*$"),                            # ()
+    re.compile(r"^\s*\(?\s*empty\s*\)?\s*$", re.IGNORECASE),    # empty / (empty)
+    re.compile(r"^\s*\(?\s*none\s*\)?\s*$", re.IGNORECASE),     # none / (none)
+    re.compile(r"^\s*\(?\s*null\s*\)?\s*$", re.IGNORECASE),     # null / (null)
     re.compile(r"^\s*\{\s*\"name\"\s*:\s*\".*?\"\s*,?\s*"),    # {"name": "...",
     re.compile(r"^\s*\"name\"\s*:"),                           # leftover "name":
     re.compile(r"^\s*\"arguments\"\s*:"),                      # leftover "arguments":
@@ -302,6 +305,9 @@ def test_balance_parenthesis():
     assert balance_parentheses('<tool_call>\nsend hi\n</tool_call>') == '((send "hi"))'
     # 4. empty braces are dropped
     assert balance_parentheses('[TOOL_CALL]\n{}\n[/TOOL_CALL]') == '()'
+    # 4b. idle-turn sentinel words are dropped rather than sent to chat
+    assert balance_parentheses('empty') == '()'
+    assert balance_parentheses('(empty)') == '()'
     # 5. markdown code fences are stripped
     assert balance_parentheses('```\nsend hi\n```') == '((send "hi"))'
     # 6. multiple lines: send + orphan prose
