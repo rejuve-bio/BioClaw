@@ -331,13 +331,23 @@ def describe_schema() -> str:
 
 
 def provenance(entity_name: str) -> str:
-    """Return provenance info for all edges (incident to entity_name).
+    """Return provenance info for edges incident to entity_name.
+
     Reports both BioCypher source provenance (source DB, db_reference, evidence
-    code, reference, date) and BioClaw agent provenance (who staged/promoted)."""
+    code, reference, date) and BioClaw agent provenance (who staged/promoted).
+
+    The result is capped to BIOKG_PROVENANCE_LIMIT edges (default 8) to keep
+    the payload small enough for weak LLMs to relay reliably. Hub entities
+    like BRCA1 have dozens of incident edges; without a cap the relay
+    routinely chokes."""
     name = str(entity_name).strip().strip('"').strip("'").strip()
     if not name:
         return "error: biokg-provenance requires an entity name"
-    return _get_backend().provenance(name)
+    try:
+        limit = int(os.environ.get("BIOKG_PROVENANCE_LIMIT", "8"))
+    except (TypeError, ValueError):
+        limit = 8
+    return _get_backend().provenance(name, limit=limit)
 
 
 def describe_source(source_key: str) -> str:
@@ -708,7 +718,7 @@ class DisabledBackend:
     def describe_schema(self) -> str:
         return f"biokg unavailable ({self._reason})"
 
-    def provenance(self, name: str) -> str:
+    def provenance(self, name: str, limit: int = 8) -> str:
         return f"biokg unavailable ({self._reason}); no provenance"
 
     def describe_source(self, key: str) -> str:
@@ -1579,7 +1589,7 @@ class MorkBackend:
     def describe_schema(self) -> str:
         return "biokg mork backend is not yet implemented; no schema available"
 
-    def provenance(self, name: str) -> str:
+    def provenance(self, name: str, limit: int = 8) -> str:
         return "biokg mork backend is not yet implemented; no provenance"
 
     def describe_source(self, key: str) -> str:

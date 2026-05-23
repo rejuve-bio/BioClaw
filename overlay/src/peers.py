@@ -11,9 +11,9 @@ import urllib.request
 
 def _default_timeout():
     try:
-        return float(os.environ.get("BIOCLAW_PEER_TIMEOUT", "180"))
+        return float(os.environ.get("BIOCLAW_PEER_TIMEOUT", "300"))
     except (TypeError, ValueError):
-        return 180.0
+        return 300.0
 
 
 def _peers():
@@ -79,6 +79,18 @@ def ask(role, query, timeout=None):
     # Telegram channel adapter converts the '\n' literal back into real
     # newlines on the way out (same convention as internal_rpc.send_message).
     reply = _flatten_for_relay(reply)
+    # Hard-cap relay payload to keep the conductor's LLM able to emit a clean
+    # single `send <reply>` line. Without this, hub-entity responses (e.g.
+    # `biokg-provenance BRCA1` returning ~30 edges of provenance) routinely
+    # exceed the LLM's reliable single-token-output window and the relay step
+    # silently fails. Override via BIOCLAW_RELAY_MAX_CHARS (default 1500).
+    try:
+        max_chars = int(os.environ.get("BIOCLAW_RELAY_MAX_CHARS", "1500"))
+    except (TypeError, ValueError):
+        max_chars = 1500
+    if max_chars > 0 and len(reply) > max_chars:
+        omitted = len(reply) - max_chars
+        reply = reply[:max_chars] + f" ... [+{omitted} more chars truncated for relay]"
     return f"[{role}-agent replied — relay this verbatim to the user with the send command]: {reply}"
 
 
