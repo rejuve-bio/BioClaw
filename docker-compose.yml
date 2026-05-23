@@ -60,9 +60,9 @@ services:
       - "maxHistory=${CONDUCTOR_MAX_HISTORY:-5000}"
       - "maxFeedback=${CONDUCTOR_MAX_FEEDBACK:-8000}"
       # Reactive mode — Conductor only acts on a HUMAN_MESSAGE; no autonomous
-      # wake-ups (Conductor would just confabulate noise on idle ticks).
-      # maxNewInputLoops=1: process each new IRC message exactly once.
-      - "maxNewInputLoops=1"
+      # wake-ups. It still needs a second turn to relay the specialist's
+      # [assistant/reasoner-agent replied ...] result back to IRC/Telegram.
+      - "maxNewInputLoops=2"
       - "maxWakeLoops=0"
       - "wakeupInterval=86400"
       # Telegram args (used when COMMCHANNEL=telegram, which is the default)
