@@ -180,13 +180,28 @@ _MONOLOGUE_STARTS = (
     "i should ",
     "i need to ",
     "i will ",
+    "i've already",
+    "i have already",
     "let me ",
     "looking at ",
     "based on the ",
     "according to ",
     "the instruction ",
+    "the user's message",
+    "the user said",
+    "the previous request",
+    "the last request",
+    "for this turn",
+    "this turn ",
+    "in this turn",
+    "this is an empty turn",
     "now i need to",
     "since the ",
+    "no output - ",
+    "no output -",
+    "no output: ",
+    "(no output",
+    "(empty turn",
 )
 
 
@@ -403,6 +418,22 @@ def test_balance_parenthesis():
     # 14. Multiple auto-wrapped orphan prose: cap at one
     multi_orphan = balance_parentheses('First sentence.\nSecond sentence.\nThird sentence.')
     assert multi_orphan == '((send "First sentence."))', f"got: {multi_orphan}"
+
+    # 15. New monologue patterns — "The user's message is empty..." gets dropped
+    msg = balance_parentheses('send The user\'s message is empty. According to the EMPTY TURN HANDLING section, I should output nothing.')
+    assert msg == '()', f"got: {msg}"
+
+    # 16. "For this turn at 21:13:45, there is no new peer request..." gets dropped
+    forthis = balance_parentheses('send For this turn at 21:13:45, there is no new peer request and the previous request has already been answered.')
+    assert forthis == '()', f"got: {forthis}"
+
+    # 17. "no output - waiting for ..." status comments get dropped
+    noop = balance_parentheses('send no output - waiting for assistant reply on prior TP53 query')
+    assert noop == '()', f"got: {noop}"
+
+    # 18. "(no output - ..." parenthesized comments get dropped
+    noop2 = balance_parentheses('(no output - no new HUMAN_MESSAGE)')
+    assert noop2 == '()', f"got: {noop2}"
 
 
 if __name__ == "__main__":
