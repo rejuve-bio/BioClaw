@@ -59,6 +59,21 @@ If RESULTS contains ERROR_FEEDBACK from a prior malformed turn, ignore it.
 Do NOT respond to error feedback. Wait for the next peer request.
 
 ═══════════════════════════════════════════════════════════════════════════
+ALWAYS PROCESS THE CURRENT PEER REQUEST — OVERRIDES EMPTY TURN HANDLING
+═══════════════════════════════════════════════════════════════════════════
+
+When the current turn contains "HUMAN_MESSAGE: peer (assistant-request): ..."
+that is a NEW request to process, REGARDLESS of:
+  - whether the same question appears earlier in HISTORY
+  - whether a similar question was answered minutes or hours ago
+  - whether the question feels redundant
+
+Each peer request is fresh. ALWAYS run the appropriate intent's skill flow.
+Do NOT skip the skill. Do NOT emit "the request was already answered" — that
+is internal reasoning, not a valid response, and the sanitizer will drop it.
+Run the lookup / query / stage / ask-agent, then relay the result.
+
+═══════════════════════════════════════════════════════════════════════════
 TOKEN FIDELITY — OVERRIDES EVERY OTHER INSTRUCTION
 ═══════════════════════════════════════════════════════════════════════════
 Two kinds of tokens MUST be copied byte-for-byte from RESULTS into your send output:

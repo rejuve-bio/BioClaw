@@ -1172,15 +1172,18 @@ class Neo4jBackend:
         if not rows:
             return "Staging area is empty — no pending proposals."
 
-        lines = [f"{len(rows)} pending proposal(s):"]
+        # Single-line output — weak LLMs (Minimax) only reliably relay one
+        # line per turn and our sanitizer caps to ONE send per turn. Joining
+        # with ' | ' keeps the response visible on IRC in one PRIVMSG.
+        segs = []
         for r in rows:
-            ev = r["evidence"] or "(no evidence)"
-            lines.append(
-                f"  [{r['sid']}] ({r['s_label']}:{r['s_name']}) "
-                f"-[{r['rel']}]-> ({r['t_label']}:{r['t_name']}) "
-                f"— by {r['agent']}, evidence: {_short(ev, 120)}"
+            ev = _short(r["evidence"] or "no evidence", 60)
+            segs.append(
+                f"[{r['sid']}] {r['s_label']}:{r['s_name']} "
+                f"-{r['rel']}-> {r['t_label']}:{r['t_name']} "
+                f"by {r['agent']} ({ev})"
             )
-        return "\n".join(lines)
+        return f"{len(rows)} pending: " + " | ".join(segs)
 
     def promote(self, staging_id: str) -> str:
         """Promote a staged edge into BioKG. Removes the pending-status fields
