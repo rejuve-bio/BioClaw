@@ -794,6 +794,7 @@ class Neo4jBackend:
             "       startNode(r) = n AS outgoing, "
             "       labels(m) AS m_labels, "
             f"       {coalesce_m} AS m_name "
+            "ORDER BY (r._staged_by IS NOT NULL) DESC "
             f"LIMIT {max_conn}"
         )
         try:
