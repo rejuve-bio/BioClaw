@@ -1303,7 +1303,7 @@ class Neo4jBackend:
             f"RETURN labels(s)[0]            AS s_label, {coalesce_s} AS s_name, "
             f"       labels(t)[0]            AS t_label, {coalesce_t} AS t_name, "
             "       r.source              AS source, "
-            "       r.evidence_code       AS evidence_code, "
+            "       coalesce(r.evidence_code, r.evidence) AS evidence_code, "
             "       r.confidence          AS edge_confidence, "
             "       r.score               AS edge_score, "
             "       r.biological_context  AS biological_context, "
@@ -1435,7 +1435,7 @@ class Neo4jBackend:
             "       r.source              AS source, "
             "       r.confidence          AS edge_confidence, "
             "       r.score               AS edge_score, "
-            "       r.evidence_code       AS evidence_code"
+            "       coalesce(r.evidence_code, r.evidence) AS evidence_code"
         )
         try:
             with self._driver.session(database=self._database) as session:
