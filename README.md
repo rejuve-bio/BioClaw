@@ -1,16 +1,32 @@
-# BioClaw — Phase 0
+# BioClaw — Phase 1
 
-Three OmegaClaw agents running side by side, with the Conductor able to delegate
-work to specialist peers over HTTP.
+A multi-agent biocurator assistant built on OmegaClaw. Three agents coordinate
+to answer biology questions grounded in a BioKG (BioCypher-loaded Neo4j), with
+formal evidence reasoning via PLN and a human-in-the-loop approval gate for any
+new edges entering the canonical knowledge graph.
 
 ```
-   Telegram ──► conductor ──► query-oc       (HTTP, port 8080, internal-rpc channel)
-                          └─► annotation-oc  (HTTP, port 8080, internal-rpc channel)
+   IRC / Telegram ──► Conductor ──► AssistantOC   (HTTP, internal-rpc channel)
+                              └─► ReasonerOC
 ```
 
-In Phase 0 the three agents are functionally identical — same prompt, same
-skills. The point is to validate the inter-agent plumbing. Specialization
-(role-specific prompts, skills, BioKG access) lands in Phase 1+.
+## Architecture
+
+Three agents, each running OmegaClaw with a role-specific prompt:
+
+| Agent | Role | Owns |
+|---|---|---|
+| **Conductor** | Talks to the biocurator; routes questions; owns the approval workflow. Does not do biology itself. | `biokg-promote`, `biokg-reject`, `biokg-list-staging`, `ask-agent` |
+| **AssistantOC** | Biocurator-facing switchboard: lookups, provenance, explanations, edge proposals. Five distinct intent sections inside one prompt. | `biokg-lookup`, `biokg-provenance`, `biokg-stage`, `biokg-schema` |
+| **ReasonerOC** | Formal-reasoning substrate. All NAL / PLN / AtomSpace work lives here. | `biokg-pln-evidence-merge`, `biokg-pln-source-aggregate`, three more in backlog |
+
+The original design called for seven specialists. Phase 1 collapses that to
+three for reliability: with a weak underlying LLM (Minimax), seven coordinating
+agents introduced too many failure points. AssistantOC's prompt has five
+distinct intent sections — lookup, provenance, explanation, proposal,
+delegate-formal — each one maps cleanly to a Phase-2 specialist when the
+substrate is mature enough to split them out. The design isn't gone, it's
+staged.
 
 ## Layout
 
@@ -19,15 +35,23 @@ bioclaw/
 ├── Dockerfile              # FROM singularitynet/omegaclaw:hackathon2604
 ├── docker-compose.yml      # 3 services on a shared network
 ├── overlay/                # files copied INTO the image at build time
+│   ├── conductor-prompt.txt
+│   ├── assistant-prompt.txt
+│   ├── reasoner-prompt.txt
 │   ├── channels/
-│   │   └── internal_rpc.py     # new HTTP-server channel adapter
+│   │   └── internal_rpc.py     # HTTP-server channel adapter
+│   ├── config/
+│   │   ├── schema.yaml         # BioCypher schema (loaded entities/edges)
+│   │   └── data_sources.yaml   # source-token → URL registry
 │   └── src/
+│       ├── biokg.py            # all biokg-* skills (lookup, PLN, stage, etc.)
+│       ├── helper.py           # runtime sanitizer for weak-LLM output
 │       ├── peers.py            # conductor's HTTP client
 │       ├── channels.metta      # patched: dispatches internal-rpc
-│       └── skills.metta        # patched: registers ask-agent skill
+│       └── skills.metta        # patched: registers ask-agent + biokg skills
 ├── scripts/
-│   └── bioclaw-up          # interactive launcher
-└── .env                    # written by the launcher (gitignored)
+│   └── bioclaw-up              # interactive launcher
+└── .env                        # written by the launcher (gitignored)
 ```
 
 ## Run
@@ -36,304 +60,276 @@ bioclaw/
 ./scripts/bioclaw-up
 ```
 
-You'll be prompted for:
-1. Telegram bot token (Conductor's bot — reuse your existing one)
-2. LLM provider
-3. LLM API key (shared by all 3 agents)
+You'll be prompted for the bot token, the LLM provider, and the API key. The
+script writes `.env`, builds the image, and brings up the stack.
 
-The script writes `.env`, builds the image, brings up the stack.
+After startup, watch all three agents at once:
 
-## Test the inter-agent flow
-
-Open your bot in Telegram and send the auth secret printed by the launcher
-(`auth <secret>`), then:
-
-```
-Use the ask-agent skill to ask the "annotation" specialist what it would do
-to annotate the gene TP53 with function "tumor suppressor".
-```
-
-Expected sequence in the logs:
-1. `conductor` receives the message from Telegram
-2. `conductor` invokes `(ask-agent "annotation" "...")`
-3. `annotation-oc` receives the request via `internal_rpc.getLastMessage()`
-4. `annotation-oc` produces a reply and calls `send_message`
-5. The HTTP call from `conductor` returns; `conductor` relays the reply on Telegram
-
-Watch all three logs at once:
 ```bash
 docker compose logs -f
 ```
 
-## Common operations
+## Working capabilities
 
-```bash
-docker compose ps                     # who's up
-docker compose logs -f conductor      # one agent's logs
-docker compose restart query-oc       # bounce one agent
-docker compose down                   # stop, keep memory
-docker compose down -v                # stop + wipe memory
-docker compose build --no-cache       # force rebuild
+Every demo question grounds in a Cypher call against the BioAtomSpace. PLN
+skills add deterministic truth-value math on top.
+
+| Question pattern | Specialist | Skill |
+|---|---|---|
+| `hi`, `what can you do?` | Conductor only | (direct send) |
+| `what does TP53 do?` | AssistantOC | `biokg-lookup` |
+| `what protein does IMPACT translate to?` | AssistantOC | `biokg-lookup` (multi-hop traversal) |
+| `who said BRCA1 enables zinc ion binding?` | AssistantOC | `biokg-provenance` |
+| `reconcile BRCA1 enables zinc ion binding` | ReasonerOC | `biokg-pln-evidence-merge` |
+| `is BRCA1 enhancer-regulated?` | ReasonerOC | `biokg-pln-source-aggregate` |
+| `propose adding edge: X enables Y` | AssistantOC | `biokg-stage` |
+| `show staging` | Conductor only | `biokg-list-staging` |
+| `approve <hex>` / `reject <hex>` | Conductor only | `biokg-promote` / `biokg-reject` |
+
+Three skills still in the backlog and not yet wired into ReasonerOC's prompt:
+
+- `biokg-nal-hypothesize ENTITY` — derive novel edges by NAL forward-chaining
+- `biokg-pln-chain-confidence START|END|EDGE_TYPES` — confidence along a path
+- `biokg-pln-compose-belief QUESTION` — compound multi-edge-type questions
+
+## Formal-reasoning substrate (the OmegaClaw thesis)
+
+`biokg-pln-evidence-merge SOURCE|EDGE_TYPE|TARGET`
+
+For a single edge between two specific nodes:
+1. Cypher pulls every parallel relationship of that type.
+2. Each edge's `(source, evidence_code, edge_confidence)` is mapped to a
+   deterministic `stv(f, c)` via an evidence-code ladder
+   (IDA, IPI, IEA, BioClaw-promoted, etc.).
+3. PLN's `Truth_Revision` rule combines the per-edge stvs into one merged stv.
+4. Output is a single line, deterministic, reproducible, byte-exact.
+
+`biokg-pln-source-aggregate TARGET|EDGE_TYPE`
+
+For cross-method consensus around a target node:
+1. Cypher pulls every edge of `EDGE_TYPE` incident to `TARGET`.
+2. Groups edges by `r.source` (e.g. PEREGRINE, Enhancer Atlas).
+3. Computes per-source mean confidence.
+4. PLN-revises the per-source means into one cross-method consensus stv.
+5. Reports per-source `n`, `mean`, `max` so the biocurator can sanity-check.
+
+The TOKEN FIDELITY rule in both the Conductor and Reasoner prompts ensures
+`stv(f, c)` values are copied byte-for-byte through the relay chain. They're
+never paraphrased, rounded, or regenerated.
+
+## Staging → human approval → promotion
+
+Specialists never write directly to canonical BioKG. Every new edge goes
+through the approval gate:
+
 ```
+biocurator:  propose adding edge: TP53 enables protein heterodimerization activity
+Conductor:   Working on it; routing the proposal...
+             (→ AssistantOC runs biokg-stage → returns [STAGED edge b534b898])
+Conductor:   [STAGED edge b534b898] (gene:TP53) -[enables]-> (molecular_function:protein heterodimerization activity)
+             To approve, reply: approve b534b898. To reject, reply: reject b534b898.
 
-## How the internal-rpc channel works
-
-Each specialist runs a tiny HTTP server inside the container:
-
-| Endpoint  | Method | Purpose                                                |
-|-----------|--------|--------------------------------------------------------|
-| `/ask`    | POST   | `{"text": "...", "timeout": 180}` → `{"reply": "..."}` |
-| `/health` | GET    | `{"ok": true, "role": "..."}`                          |
-
-The channel adapter mirrors `channels/telegram.py`:
-
-- `getLastMessage()` pops the next pending request from an in-memory queue.
-- `send_message(text)` accumulates output for the in-flight request.
-- A small finalizer thread releases the HTTP caller once the agent's been
-  quiet for ~2 seconds (it can call `send` multiple times per turn).
-
-The Conductor side (`src/peers.py`) reads peer addresses from the
-`BIOCLAW_PEERS` env var and exposes a single function `peers.ask(role, query)`
-which the MeTTa skill `(ask-agent role query)` calls via `py-call`.
-
-## Phase 2B — staging + human approval
-
-Specialists can propose new edges into a **staging area** instead of writing
-directly to the BioKG. Proposals must be approved by a human (you) via chat
-before they're promoted into the canonical KG.
+biocurator:  approve b534b898
+Conductor:   Promoted [b534b898] (edge type enables) into BioKG; provenance retained.
+```
 
 ### Storage model
 
-Every staged edge lives in the same Neo4j as "truth" but carries
-`_staging_id`, `_staged_by`, `_staged_at`, `_evidence`, `_confidence`, and
-`_status` properties. Promote = strip those properties (the edge becomes
-indistinguishable from any other). Reject = delete the edge.
+Every staged edge lives in the same Neo4j as canonical truth but carries
+extra properties:
 
-### Skills added in Phase 2B
+- `_staging_id` — 8-char hex token used in approve/reject
+- `_staged_by` — proposing specialist
+- `_staged_at` — ISO datetime
+- `_evidence` — free-text justification
+- `_confidence` — initial proposer confidence (default 0.7)
+- `_status` — `pending` | `promoted` | `rejected`
 
-| Skill | Who calls it | What it does |
-|---|---|---|
-| `biokg-stage SOURCE\|EDGE\|TARGET\|EVIDENCE` | Specialists | Create a pending edge proposal |
-| `biokg-list-staging` | Conductor | Enumerate pending proposals |
-| `biokg-promote <id>` | Conductor (after human approval) | Strip staging properties → into KG |
-| `biokg-reject <id>` | Conductor (after human rejection) | Delete the proposal |
+`promote()` retains the agent-provenance fields (`_staged_by`, `_staged_at`,
+`_evidence`) and just flips `_status='pending'` → `_status='promoted'`. Only
+the staging-state markers (`_staging_id`, the pending flag) are stripped.
+Lineage is queryable forever.
 
-### Chat workflow
-
-```
-You:        propose annotation: TP53 enables nuclear protein binding, evidence: lookup data
-Conductor:  Working on it; routing to the annotation specialist…
-            (delegates → specialist runs biokg-stage → returns [STAGED edge a1b2c3d4])
-Conductor:  [STAGED edge a1b2c3d4] (gene:TP53) -[enables]-> (molecular_function:nuclear protein binding) by annotation, evidence: 'lookup data'
-Conductor:  To approve, reply: approve a1b2c3d4. To reject, reply: reject a1b2c3d4. To list pending, reply: show staging.
-
-You:        approve a1b2c3d4
-Conductor:  Promoted [a1b2c3d4] (edge type enables) into BioKG.
-```
-
-You can list pending proposals at any time with `show staging`.
-
-### Verifying staging directly (bypass chat)
-
-```bash
-# Stage from inside the conductor (skips LLM)
-docker exec bioclaw-conductor python3 -c "import sys; sys.path.insert(0,'/PeTTa/repos/OmegaClaw-Core/src'); import biokg; print(biokg.stage_pipe('TP53|enables|nuclear protein binding|test'))"
-
-# List pending
-docker exec bioclaw-conductor python3 -c "import sys; sys.path.insert(0,'/PeTTa/repos/OmegaClaw-Core/src'); import biokg; print(biokg.list_staging())"
-
-# Promote (paste the id from above)
-docker exec bioclaw-conductor python3 -c "import sys; sys.path.insert(0,'/PeTTa/repos/OmegaClaw-Core/src'); import biokg; print(biokg.promote('a1b2c3d4'))"
-```
-
-### Inspecting in Neo4j Browser
+### Inspecting in Neo4j directly
 
 ```cypher
 // All pending proposals
-MATCH (s)-[r]->(t) WHERE r._staging_id IS NOT NULL
+MATCH (s)-[r]->(t) WHERE r._status = 'pending'
 RETURN s, r, t LIMIT 25;
 
-// All edges (staging + truth) of a specific type for a gene
-MATCH (g:gene {gene_name:'TP53'})-[r:enables]->(m)
-RETURN g.gene_name, r._status, r._staging_id, m;
+// Promoted-via-stage edges for a gene
+MATCH (g:gene {gene_name:'TP53'})-[r]->(m)
+WHERE r._staged_by IS NOT NULL AND r._status = 'promoted'
+RETURN g.gene_name, type(r), r._staged_by, r._evidence, m;
 ```
+
+### Bypassing chat for direct testing
+
+```bash
+# Stage from inside the conductor (skips the LLM)
+docker exec bioclaw-conductor python3 -c \
+  "import sys; sys.path.insert(0,'/PeTTa/repos/OmegaClaw-Core/src'); \
+   import biokg; print(biokg.stage_pipe('TP53|enables|protein heterodimerization activity|test'))"
+
+# List pending
+docker exec bioclaw-conductor python3 -c \
+  "import sys; sys.path.insert(0,'/PeTTa/repos/OmegaClaw-Core/src'); \
+   import biokg; print(biokg.list_staging())"
+
+# Promote (paste the hex from above)
+docker exec bioclaw-conductor python3 -c \
+  "import sys; sys.path.insert(0,'/PeTTa/repos/OmegaClaw-Core/src'); \
+   import biokg; print(biokg.promote('a1b2c3d4'))"
+```
+
+## Engineering hardening for weak LLMs
+
+A lot of the runtime stability work is in `overlay/src/helper.py`. The
+sanitizer runs in the agent loop before MeTTa parsing and catches Minimax's
+common misbehaviors:
+
+- Strips wrapper tokens: `[TOOL_CALL]`, `<tool_call>`, `<function_call>`,
+  ` ```json ` markdown fences, JSON tool-call shapes.
+- Drops placeholder lines: `{}`, `[]`, `(empty)`, `none`, `null`.
+- Drops monologue patterns: lines starting with `I should`, `Looking at`,
+  `According to`, `the user's message`, `for this turn`, etc.
+- Drops feedback echo patterns: sends that quote `ERROR_FEEDBACK:`,
+  `HUMAN_MESSAGE:`, `LAST_SKILL_USE_RESULTS:`.
+- Whitelists known skills (`KNOWN_SKILLS` set plus a `biokg-*` prefix rule)
+  so unknown first tokens are auto-wrapped as `send <prose>` instead of
+  silently dropped.
+- Caps one `send` per turn. Kills triple-greeting and paraphrase cascades.
+
+A parallel piece in `overlay/src/peers.py` caps relay payloads at 1500 chars
+(`BIOCLAW_RELAY_MAX_CHARS`) and wraps error returns with the
+`[role-agent replied — relay this verbatim]:` tag so the Conductor knows to
+forward errors instead of silently dropping them.
+
+These are not biology fixes. They're tool-use discipline. The system runs
+coherently on Minimax because of them.
 
 ## Schema config
 
-BioClaw reads its KG schema from a **BioCypher-format YAML** file at
-`/opt/bioclaw/config/schema.yaml` (bundled with the image). It's the
-canonical biocypher-kg schema config, restricted to the entities and edges
-currently loaded into Neo4j (gene, protein, transcript, pathway, GO terms,
-disease + their 7 edge types).
+BioClaw reads its KG schema from a BioCypher-format YAML file at
+`/opt/bioclaw/config/schema.yaml`. It's the canonical biocypher-kg schema,
+restricted to the entities and edges actually loaded into Neo4j (gene, protein,
+transcript, pathway, GO terms, molecular_function, biological_process, disease,
+enhancer, plus their edge types).
 
 ### What the loader extracts
 
 - **Nodes** (`represented_as: node`): the `input_label` becomes the Neo4j
-  label, the property annotated `biolink: name` becomes the lookup property.
-  Inheritance via `is_a` + `inherit_properties: true` is followed — that's
-  how the four GO terms and disease all pick up `term_name` from
-  `ontology term`.
-- **Edges** (`represented_as: edge`): `output_label` (or `input_label` if
-  absent) becomes the Neo4j relationship type. `source` and `target` (which
-  can be a single entity name or a list) become the allowed endpoint types
-  for `biokg-stage` validation.
+  label; the property annotated `biolink: name` becomes the lookup property.
+  Inheritance via `is_a` + `inherit_properties: true` is followed — that's how
+  GO terms and disease pick up `term_name` from `ontology term`.
+- **Edges** (`represented_as: edge`): `output_label` (or `input_label`)
+  becomes the Neo4j relationship type. `source` and `target` (entity name or
+  list) become the allowed endpoint types for `biokg-stage` validation.
 
 ### Customizing
 
 Two knobs in `.env`:
 
 ```bash
-# Point at any BioCypher schema_config.yaml (yours, the upstream biocypher-kg one, etc.)
+# Point at any BioCypher schema_config.yaml
 BIOCLAW_SCHEMA_FILE=/path/inside/container/schema.yaml
 
-# Override the auto-derived name-property list only if you really need to:
+# Override the auto-derived name-property list only if needed
 BIOCLAW_NAME_PROPERTIES=gene_name,protein_name,term_name,id
 ```
 
-To use a different schema file:
+### Schema validation
 
-```bash
-# Mount your file into the container in docker-compose.yml
-volumes:
-  - /host/path/hsa_schema_config.yaml:/etc/bioclaw/hsa_schema.yaml:ro
+When `biokg-stage SRC|EDGE|TGT|...` is called, the schema enforces:
 
-# Then in .env:
-BIOCLAW_SCHEMA_FILE=/etc/bioclaw/hsa_schema.yaml
-```
+1. `EDGE` exists in the schema.
+2. The Neo4j label of `SRC` is in the edge's allowed `source` list.
+3. The Neo4j label of `TGT` is in the edge's allowed `target` list.
 
-### Validation
-
-When `biokg-stage SRC|EDGE|TGT|...` is called, the loaded schema enforces:
-
-1. `EDGE` exists in the schema (rejects unknown edge types up-front)
-2. The Neo4j label of `SRC` is in the edge's allowed `source` list
-3. The Neo4j label of `TGT` is in the edge's allowed `target` list
-
-Violations return an `error: schema validation failed: ...` string instead of
-silently creating a malformed proposal.
+Violations return `error: schema validation failed: ...` instead of silently
+creating a malformed proposal.
 
 ### Introspection skill
-
-Both the LLM and you can ask:
 
 ```
 biokg-schema
 ```
 
-→ prints all entity labels with their name property, plus all edge types
-with their allowed source/target labels.
+Prints all entity labels with their name property, plus all edge types with
+their allowed source/target labels.
 
 ## Neo4j connection — switching instances
 
-All connection details live in `.env`. To point at a different Neo4j:
+All connection details live in `.env`:
 
 ```bash
-NEO4J_URI=bolt+s://your-host:7687     # plain bolt://, bolt+s://, neo4j+s://...
+NEO4J_URI=bolt+s://your-host:7687
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=...
-NEO4J_DATABASE=neo4j                  # multi-DB Neo4j installs only
+NEO4J_DATABASE=neo4j
 ```
 
-Then `docker compose up -d --force-recreate` so all 3 agents pick up the
-new endpoint. **Same code, different KG.**
+Then `docker compose up -d --force-recreate` so all three agents pick up the
+new endpoint. Same code, different KG.
 
-Cross-network reachability: if your Neo4j runs in a separate compose project
-on the same host, attach it to bioclaw's network so the agents can resolve
-its container name:
+If your Neo4j runs in a separate compose project on the same host, attach it
+to bioclaw's network:
 
 ```bash
 docker network connect bioclaw_default <neo4j-container>
 ```
 
-## Phase 3 — specialist differentiation + reasoning-adjacent agents
+## Provenance — two complementary kinds
 
-The stack now runs **5 specialists** with distinct prompts and access scopes,
-all coordinated by the Conductor over the same `internal-rpc` channel.
+`biokg-provenance ENTITY` returns both kinds the KG carries:
 
-### Specialists and scopes
-
-| Specialist | Role | KG access |
-|---|---|---|
-| **query**       | Read-only factual lookups | `biokg-lookup`, `biokg-query`, `biokg-schema` |
-| **annotation**  | Propose new annotations (GO terms, gene–function edges) | + `biokg-stage` |
-| **relation**    | Propose new edges via graph traversal patterns (transitivity, co-membership) | + `biokg-stage`, heavy `biokg-query` use |
-| **provenance**  | Answer "who proposed which edge and when" | + `biokg-provenance` |
-| **explanation** | Explain WHY a result holds by tracing supporting edges + their provenance | + `biokg-provenance` (read-only) |
-
-Skill access is enforced by **prompt** (each specialist's system prompt lists
-the skills it may call; calling forbidden skills like `biokg-promote` is
-explicitly disallowed). For hard enforcement we'd add a server-side
-permission check; the prompt-level enforcement is sufficient for the paper's
-intent.
-
-### Provenance — two complementary kinds
-
-BioClaw's `biokg-provenance ENTITY` returns BOTH kinds the KG carries:
-
-1. **BioCypher source provenance** — embedded directly by the BioCypher
-   pipeline when ingesting from external databases:
-   - On nodes: `source`, `source_url` (e.g. `source=GENCODE`,
-     `source=UniProt`, `source=Reactome`)
-   - On edges (especially GAF / Alliance): `source`, `db_reference`,
-     `evidence`, `evidence_code`, `evidence_code_name`, `reference`, `date`
+1. **BioCypher source provenance** — embedded by the BioCypher pipeline
+   during ingestion:
+   - On nodes: `source`, `source_url` (e.g. `source=GENCODE`, `UniProt`)
+   - On edges: `source`, `db_reference`, `evidence`, `evidence_code`,
+     `reference`, `date`
    - Output tag: `[BioCypher: edge source=...; db_ref=...; ...]`
 2. **BioClaw agent provenance** — written by specialists via `biokg-stage`
    and preserved on `biokg-promote`:
-   - `_staged_by`, `_staged_at`, `_evidence`, `_confidence`,
-     `_promoted_at`, `_status`
+   - `_staged_by`, `_staged_at`, `_evidence`, `_confidence`, `_promoted_at`,
+     `_status`
    - Output tag: `[BioClaw: proposed by AGENT on DATE; status=...; ...]`
 
-`promote()` in Phase 3 was fixed to RETAIN the agent provenance fields
-(originally Phase 2B stripped them all). Only `_staging_id` and `_status`
-(pending-state markers) are removed; everything else stays so the lineage
-is queryable forever.
+The `overlay/config/data_sources.yaml` file maps source tokens that appear in
+Neo4j (`gaf`, `GENCODE`, `Gene Ontology`, etc.) to full names + canonical URLs
+so output reads e.g. `Gene Ontology <http://purl.obolibrary.org/obo/go.owl>`
+instead of the bare token.
 
-An edge can have both kinds (rare — a specialist could later "re-stage" a
-BioCypher edge), just one (typical), or neither (rare — a manually-inserted
-edge without either source or agent fields).
+## Common operations
 
-### Data-source registry
+```bash
+docker compose ps                     # who's up
+docker compose logs -f conductor      # one agent's logs
+docker compose restart assistant-oc   # bounce one agent
+docker compose down                   # stop, keep memory
+docker compose down -v                # stop + wipe memory (fresh demo state)
+docker compose build --no-cache       # force rebuild
+```
 
-`overlay/config/data_sources.yaml` maps source tokens that appear in Neo4j
-(`source=gaf`, `source=GENCODE`, `source=Gene Ontology`, ...) to their full
-name + canonical URL(s). `biokg-provenance` resolves these automatically —
-you'll see `Gene Ontology <http://purl.obolibrary.org/obo/go.owl>` in the
-output instead of the bare token.
+After any code change in `overlay/src/`:
 
-The bundled registry covers all sources reachable from our 5-entity slice
-(`agr`, `gencode`, `uniprot`, `reactome`, `gaf` from BioCypher's YAML, plus
-`Gene Ontology`, `Disease Ontology`, `Human Phenotype Ontology`, etc. from
-adapter code). Extend the file or point at the upstream config via
-`BIOCLAW_DATASOURCE_FILE=/path/to/biocypher-kg/config/hsa/hsa_data_source_config.yaml`
-to cover more.
+```bash
+docker compose build conductor assistant-oc reasoner-oc
+docker compose down -v
+docker compose up -d
+```
 
-The new `biokg-source SOURCE_KEY` skill resolves a single token on demand —
-useful when a specialist sees a source token they don't recognize.
+## Phase 2 — what's next
 
-### Routing the Conductor uses
+Once the three backlog reasoning skills land, Phase 2 begins: promoting
+AssistantOC's five intent sections into dedicated specialists, each
+exercising a distinct OmegaClaw capability. The architecture already routes
+through `ask-agent`, so splitting the intents out is a matter of moving
+sections of the AssistantOC prompt into new role files and adding services in
+`docker-compose.yml`.
 
-The Conductor's prompt routes incoming HUMAN_MESSAGEs as follows (matched
-in order):
-
-| User intent | Routed to |
-|---|---|
-| "what does GENE do" / "tell me about" / "list pathways" | query |
-| "propose" / "stage" / "suggest annotation" / "add edge" | annotation |
-| "find candidate edges" / "infer via transitivity" / "suggest new relations" | relation |
-| "who proposed" / "where did this come from" / "provenance" | provenance |
-| "why does the KG say" / "explain" / "how do we know" | explanation |
-| greetings / "what skills" / "list specialists" | answered directly |
-| anything else | polite redirect to a biology question |
-
-### One-prompt entrypoint
-
-`overlay/bioclaw-entrypoint.sh` now generalizes the prompt swap — it looks
-for `/opt/bioclaw/${BIOCLAW_PROMPT}-prompt.txt`. So adding a new specialist
-in the future is just: add `<role>-prompt.txt`, add a service in compose
-with `BIOCLAW_PROMPT=<role>`, add the URL to the Conductor's
-`BIOCLAW_PEERS`, mention it in the Conductor prompt's routing rules.
-
-## Phase 0 limitations (by design)
-
-- **Wholesale-replaced upstream files.** `channels.metta` and `skills.metta`
-  in `overlay/` are full copies. If upstream changes them, re-merge here.
+The `bioclaw-entrypoint.sh` script generalizes the prompt swap — it looks for
+`/opt/bioclaw/${BIOCLAW_PROMPT}-prompt.txt`. Adding a specialist is: drop a
+`<role>-prompt.txt`, add a service in compose with `BIOCLAW_PROMPT=<role>`,
+add its URL to the Conductor's `BIOCLAW_PEERS`, mention it in the Conductor
+prompt's routing rules.
