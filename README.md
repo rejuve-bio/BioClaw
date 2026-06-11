@@ -1,9 +1,10 @@
 # BioClaw — Phase 1
 
 A multi-agent biocurator assistant built on OmegaClaw. Three agents coordinate
-to answer biology questions grounded in a BioKG (BioCypher-loaded Neo4j), with
-formal evidence reasoning via PLN and a human-in-the-loop approval gate for any
-new edges entering the canonical knowledge graph.
+to answer biology questions grounded in a BioKG represented through
+BioCypher/MORK/MeTTa, with formal evidence reasoning via PLN-style truth-value
+revision and a human-in-the-loop approval gate for any new edges entering the
+canonical knowledge graph.
 
 ```
    IRC / Telegram ──► Conductor ──► AssistantOC   (HTTP, internal-rpc channel)
@@ -17,8 +18,8 @@ Three agents, each running OmegaClaw with a role-specific prompt:
 | Agent | Role | Owns |
 |---|---|---|
 | **Conductor** | Talks to the biocurator; routes questions; owns the approval workflow. Does not do biology itself. | `biokg-promote`, `biokg-reject`, `biokg-list-staging`, `ask-agent` |
-| **AssistantOC** | Biocurator-facing switchboard: lookups, provenance, explanations, edge proposals. Five distinct intent sections inside one prompt. | `biokg-lookup`, `biokg-provenance`, `biokg-stage`, `biokg-schema` |
-| **ReasonerOC** | Formal-reasoning substrate. All NAL / PLN / AtomSpace work lives here. | `biokg-pln-evidence-merge`, `biokg-pln-source-aggregate`, three more in backlog |
+| **AssistantOC** | Biocurator-facing switchboard: BioKG/MORK lookups, provenance, explanations, edge proposals. Five distinct intent sections inside one prompt. | `biokg-lookup`, `biokg-schema-neighbor-lookup`, `biokg-provenance`, `biokg-stage`, `biokg-schema` |
+| **ReasonerOC** | Formal-reasoning specialist. PLN/STV evidence revision and source aggregation live here. | `biokg-pln-evidence-merge`, `biokg-pln-source-aggregate`, `biokg-pln-schema-neighbor-aggregate`, three more in backlog |
 
 The original design called for seven specialists. Phase 1 collapses that to
 three for reliability: with a weak underlying LLM (Minimax), seven coordinating
@@ -46,11 +47,14 @@ bioclaw/
 │   └── src/
 │       ├── biokg.py            # all biokg-* skills (lookup, PLN, stage, etc.)
 │       ├── helper.py           # runtime sanitizer for weak-LLM output
+│       ├── interpretation.py   # specialist-side answer interpretation layer
 │       ├── peers.py            # conductor's HTTP client
-│       ├── channels.metta      # patched: dispatches internal-rpc
+│       ├── router.py           # deterministic specialist tool routing
+│       ├── channels.metta      # dispatches internal-rpc
 │       └── skills.metta        # patched: registers ask-agent + biokg skills
 ├── scripts/
-│   └── bioclaw-up              # interactive launcher
+│   ├── bioclaw-up              # interactive launcher
+│   └── bioclaw-sentinel-check.sh
 └── .env                        # written by the launcher (gitignored)
 ```
 
@@ -71,17 +75,20 @@ docker compose logs -f
 
 ## Working capabilities
 
-Every supported question grounds in a BioKG query against the configured backend. PLN
-skills add deterministic truth-value math on top.
+Every supported biology question grounds in a BioKG query against the
+configured backend. The current production path is MORK/MeTTa pattern matching,
+not Cypher. PLN-facing skills add deterministic truth-value math on top.
 
 | Question pattern | Specialist | Skill |
 |---|---|---|
 | `hi`, `what can you do?` | Conductor only | (direct send) |
 | `what does GENE_SYMBOL do?` | AssistantOC | `biokg-lookup` |
 | `what protein does GENE_SYMBOL translate to?` | AssistantOC | `biokg-lookup` (multi-hop traversal) |
+| `what molecular functions does GENE_SYMBOL enable?` | AssistantOC | `biokg-schema-neighbor-lookup` |
 | `who said SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY?` | AssistantOC | `biokg-provenance` |
 | `reconcile SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY` | ReasonerOC | `biokg-pln-evidence-merge` |
-| `is GENE_SYMBOL enhancer-regulated?` | ReasonerOC | `biokg-pln-source-aggregate` |
+| `is GENE_SYMBOL enhancer-regulated?` | ReasonerOC | `biokg-pln-schema-neighbor-aggregate` |
+| `aggregate evidence for GENE via EDGE_TYPE through LABEL` | ReasonerOC | `biokg-pln-source-aggregate` |
 | `propose adding edge: X enables Y` | AssistantOC | `biokg-stage` |
 | `show staging` | Conductor only | `biokg-list-staging` |
 | `approve <hex>` / `reject <hex>` | Conductor only | `biokg-promote` / `biokg-reject` |
@@ -103,10 +110,18 @@ responses, not active reasoning implementations:
 
 ## Formal-reasoning substrate (the OmegaClaw thesis)
 
+ReasonerOC owns the PLN-facing path. AssistantOC mostly uses BioKG/MORK access
+for lookup, provenance, explanation, and staging. ReasonerOC takes KG evidence
+from MORK, converts source/evidence annotations into STV pairs, and invokes the
+OmegaClaw/MeTTa `Truth_Revision` operation through the `biokg-pln-*` skills.
+This is a constrained deterministic skill path, not arbitrary open-ended PLN
+program synthesis.
+
 `biokg-pln-evidence-merge SOURCE|EDGE_TYPE|TARGET`
 
 For a single edge between two specific nodes:
-1. Cypher pulls every parallel relationship of that type.
+1. MORK/MeTTa pattern matching pulls every assertion of that edge type between
+   the source and target.
 2. Each edge's `(source, evidence_code, edge_confidence)` is mapped to a
    deterministic `stv(f, c)` via an evidence-code ladder
    (IDA, IPI, IEA, BioClaw-promoted, etc.).
@@ -116,7 +131,8 @@ For a single edge between two specific nodes:
 `biokg-pln-source-aggregate TARGET|EDGE_TYPE[|NEIGHBOR_LABEL]`
 
 For cross-method consensus around a target node:
-1. Cypher pulls every edge of `EDGE_TYPE` incident to `TARGET`.
+1. MORK/MeTTa pattern matching pulls every edge of `EDGE_TYPE` incident to
+   `TARGET`.
 2. If `NEIGHBOR_LABEL` is supplied, keeps only edges whose other endpoint has
    that node label.
 3. Groups edges by `r.source` (e.g. PEREGRINE, Enhancer Atlas).
@@ -132,6 +148,20 @@ multiple sources, and natural relationship phrases can use
 `TARGET|NEIGHBOR_LABEL` schema-derived routing to find the connecting edge.
 `biokg-schema-neighbor TARGET|NEIGHBOR_LABEL` reports the exact schema edge and
 aliases used, so KG/schema mismatches stay visible instead of being guessed over.
+
+### Answer style
+
+Specialists return interpreted answers by default:
+
+```bash
+BIOCLAW_ANSWER_STYLE=interpreted
+```
+
+Set `BIOCLAW_ANSWER_STYLE=raw` to return the older mechanical tool outputs for
+debugging or regression checks. Interpreted answers are still grounded in the
+same BioKG/MORK/PLN tool results; the interpretation layer only rewrites the
+presentation and adds caveats such as "single-source support" or "IEA is
+electronically inferred."
 
 The TOKEN FIDELITY rule in both the Conductor and Reasoner prompts ensures
 `stv(f, c)` values are copied byte-for-byte through the relay chain. They're
@@ -155,32 +185,27 @@ Conductor:   Promoted [b534b898] (edge type enables) into BioKG; provenance reta
 
 ### Storage model
 
-Every staged edge lives in the same Neo4j as canonical truth but carries
-extra properties:
+Every staged edge lives in the same backend as the canonical KG:
 
-- `_staging_id` — 8-char hex token used in approve/reject
-- `_staged_by` — proposing specialist
-- `_staged_at` — ISO datetime
-- `_evidence` — free-text justification
-- `_confidence` — initial proposer confidence (default 0.7)
-- `_status` — `pending` | `promoted` | `rejected`
+- In the current MORK backend, staging is represented as the proposed edge atom
+  plus `staging_*` annotation atoms such as `staging_id`, `staging_by`,
+  `staging_evidence`, `staging_confidence`, and `staging_status`.
+- In the legacy Neo4j backend, the same workflow is represented as relationship
+  properties such as `_staging_id`, `_staged_by`, `_evidence`, `_confidence`,
+  and `_status`.
 
-`promote()` retains the agent-provenance fields (`_staged_by`, `_staged_at`,
-`_evidence`) and just flips `_status='pending'` → `_status='promoted'`. Only
-the staging-state markers (`_staging_id`, the pending flag) are stripped.
-Lineage is queryable forever.
+Promotion keeps agent provenance and changes/removes only the pending-state
+marker. The important invariant is backend-independent: specialists stage
+candidate edges, and only the Conductor promotes or rejects after human approval.
 
-### Inspecting in Neo4j directly
+### Inspecting staging
 
-```cypher
-// All pending proposals
-MATCH (s)-[r]->(t) WHERE r._status = 'pending'
-RETURN s, r, t LIMIT 25;
+Use the same BioClaw skill path that IRC uses:
 
-// Promoted-via-stage edges for a named gene
-MATCH (g:gene {gene_name:'GENE_SYMBOL'})-[r]->(m)
-WHERE r._staged_by IS NOT NULL AND r._status = 'promoted'
-RETURN g.gene_name, type(r), r._staged_by, r._evidence, m;
+```bash
+docker exec bioclaw-conductor python3 -c \
+  "import sys; sys.path.insert(0,'/PeTTa/repos/OmegaClaw-Core/src'); \
+   import biokg; print(biokg.list_staging())"
 ```
 
 ### Bypassing chat for direct testing
@@ -231,20 +256,22 @@ coherently on Minimax because of them.
 ## Schema config
 
 BioClaw reads its KG schema from a BioCypher-format YAML file at
-`/opt/bioclaw/config/schema.yaml`. It's the canonical biocypher-kg schema,
-restricted to the entities and edges actually loaded into Neo4j (gene, protein,
-transcript, pathway, GO terms, molecular_function, biological_process, disease,
-enhancer, plus their edge types).
+`/opt/bioclaw/config/schema.yaml`. It is a curated BioCypher schema slice
+restricted to the entities and edges actually loaded into the BioKG/MORK
+snapshot (gene, protein, transcript, pathway, GO terms, molecular_function,
+biological_process, cellular_component, disease, enhancer, plus their edge
+types).
 
 ### What the loader extracts
 
-- **Nodes** (`represented_as: node`): the `input_label` becomes the Neo4j
+- **Nodes** (`represented_as: node`): the `input_label` becomes the BioKG/MORK
   label; the property annotated `biolink: name` becomes the lookup property.
   Inheritance via `is_a` + `inherit_properties: true` is followed — that's how
   GO terms and disease pick up `term_name` from `ontology term`.
 - **Edges** (`represented_as: edge`): `output_label` (or `input_label`)
-  becomes the Neo4j relationship type. `source` and `target` (entity name or
-  list) become the allowed endpoint types for `biokg-stage` validation.
+  becomes the edge type. `source` and `target` (entity name or list) become the
+  allowed endpoint types for schema-neighbor lookup, source aggregation, and
+  `biokg-stage` validation.
 
 ### Customizing
 
@@ -263,8 +290,8 @@ BIOCLAW_NAME_PROPERTIES=gene_name,protein_name,term_name,id
 When `biokg-stage SRC|EDGE|TGT|...` is called, the schema enforces:
 
 1. `EDGE` exists in the schema.
-2. The Neo4j label of `SRC` is in the edge's allowed `source` list.
-3. The Neo4j label of `TGT` is in the edge's allowed `target` list.
+2. The resolved BioKG label of `SRC` is in the edge's allowed `source` list.
+3. The resolved BioKG label of `TGT` is in the edge's allowed `target` list.
 
 Violations return `error: schema validation failed: ...` instead of silently
 creating a malformed proposal.
@@ -278,25 +305,24 @@ biokg-schema
 Prints all entity labels with their name property, plus all edge types with
 their allowed source/target labels.
 
-## Neo4j connection — switching instances
+## BioKG backend — switching instances
 
 All connection details live in `.env`:
 
 ```bash
-NEO4J_URI=bolt+s://your-host:7687
-NEO4J_USER=neo4j
-NEO4J_PASSWORD=...
-NEO4J_DATABASE=neo4j
+BIOKG_BACKEND=mork
+MORK_URI=http://your-mork-host:port
+MORK_NAMESPACE=default
 ```
 
 Then `docker compose up -d --force-recreate` so all three agents pick up the
 new endpoint. Same code, different KG.
 
-If your Neo4j runs in a separate compose project on the same host, attach it
-to bioclaw's network:
+The legacy Neo4j backend remains in `biokg.py` for compatibility, but the
+current BioClaw/MORK path does not implement raw Cypher passthrough:
 
-```bash
-docker network connect bioclaw_default <neo4j-container>
+```text
+biokg-query against MORK is not implemented. MORK uses MeTTa pattern queries.
 ```
 
 ## Provenance — two complementary kinds
@@ -305,8 +331,8 @@ docker network connect bioclaw_default <neo4j-container>
 
 1. **BioCypher source provenance** — embedded by the BioCypher pipeline
    during ingestion:
-   - On nodes: `source`, `source_url` (e.g. `source=GENCODE`, `UniProt`)
-   - On edges: `source`, `db_reference`, `evidence`, `evidence_code`,
+   - On nodes/atoms: `source`, `source_url` (e.g. `source=GENCODE`, `UniProt`)
+   - On edges/edge atoms: `source`, `db_reference`, `evidence`, `evidence_code`,
      `reference`, `date`
    - Output tag: `[BioCypher: edge source=...; db_ref=...; ...]`
 2. **BioClaw agent provenance** — written by specialists via `biokg-stage`
@@ -316,9 +342,27 @@ docker network connect bioclaw_default <neo4j-container>
    - Output tag: `[BioClaw: proposed by AGENT on DATE; status=...; ...]`
 
 The `overlay/config/data_sources.yaml` file maps source tokens that appear in
-Neo4j (`gaf`, `GENCODE`, `Gene Ontology`, etc.) to full names + canonical URLs
-so output reads e.g. `Gene Ontology <http://purl.obolibrary.org/obo/go.owl>`
+BioKG/MORK (`gaf`, `GENCODE`, `Gene Ontology`, etc.) to full names + canonical
+URLs so output reads e.g. `Gene Ontology <http://purl.obolibrary.org/obo/go.owl>`
 instead of the bare token.
+
+## Reliability checks
+
+Run the sentinel check before IRC testing or after rebuilding containers:
+
+```bash
+./scripts/bioclaw-sentinel-check.sh
+```
+
+It compares conductor, AssistantOC, and ReasonerOC on representative grounded
+queries:
+
+- `IMPACT|enhancer`
+- `TP53|disease`
+- `BRCA1|enables|zinc ion binding`
+
+It also validates that the routed specialist paths are current and interpreted.
+The check should pass before treating an IRC session as reliable.
 
 ## Common operations
 

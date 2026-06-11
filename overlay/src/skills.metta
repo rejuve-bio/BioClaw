@@ -28,9 +28,9 @@
     "  Returns a connectivity summary (labels + connected entities) or a 'not found' message."
     "  Use this BEFORE answering a biology question about a specific gene/protein/pathway/disease."
     "  Example: biokg-lookup GENE_SYMBOL"
-    "- Run a raw query against the BioKG (Cypher when backend is Neo4j). Single argument: biokg-query QUERY_STRING"
-    "  Use only when biokg-lookup is insufficient (e.g. multi-hop traversal)."
-    "  Example: biokg-query MATCH (g:gene)-[r]->(m) RETURN g, r, m LIMIT 10"
+    "- Raw backend query escape hatch. Single argument: biokg-query QUERY_STRING"
+    "  Current MORK deployments do not support Cypher passthrough; use"
+    "  biokg-lookup or schema-neighbor skills for supported BioKG access."
     ;BIO KNOWLEDGE GRAPH (write — staging + human approval):
     "- Propose a NEW edge into the BioKG staging area. Format: biokg-stage SOURCE|EDGE_TYPE|TARGET|EVIDENCE"
     "  Pipe-separated single argument. SOURCE and TARGET must already exist in BioKG. EVIDENCE is a brief justification."

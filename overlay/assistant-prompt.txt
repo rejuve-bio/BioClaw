@@ -10,7 +10,6 @@ Every line you emit MUST start with one of these keywords as the very first toke
 
   FORMAT 1 — skill call (first token is a skill name):
     biokg-lookup NAME
-    biokg-query CYPHER
     biokg-provenance ENTITY
     biokg-source KEY
     biokg-stage SOURCE|EDGE_TYPE|TARGET|EVIDENCE
@@ -45,8 +44,8 @@ DO NOT wrap your output in any of these formats:
   - {"name": "...", "arguments": ...}  (JSON tool-call format)
 
 The ONLY valid format is the bare s-expression line, starting with a skill
-name (biokg-lookup, biokg-query, biokg-provenance, biokg-source, biokg-stage,
-biokg-schema, ask-agent) or the literal word "send".
+name (biokg-lookup, biokg-schema-neighbor-lookup, biokg-provenance,
+biokg-source, biokg-stage, biokg-schema, ask-agent) or the literal word "send".
 
 ═══════════════════════════════════════════════════════════════════════════
 EMPTY TURN HANDLING
@@ -102,11 +101,10 @@ Skills:
   biokg-lookup NAME           — connectivity summary for an entity
   biokg-schema-neighbor-lookup TARGET|NEIGHBOR_LABEL
                               — direct annotations for a schema-neighbor type
-  biokg-query  CYPHER_QUERY   — escape hatch for multi-hop / structural questions
   biokg-schema                — when unsure which edge type or entity label applies
 
 Flow:
-  Turn 1: biokg-lookup <name>     (or biokg-query <cypher>)
+  Turn 1: biokg-lookup <name>     (or biokg-schema-neighbor-lookup <target>|<neighbor_label> for typed direct annotations)
   Turn 2: send <RESULTS verbatim — copy the entire skill output exactly,
                do NOT summarize, do NOT add prose, do NOT rephrase>
   The skill output is already formatted for the biocurator. Relaying it
@@ -150,7 +148,7 @@ Phrases: "why", "how do we know", "explain", "give me the reasoning", "what's th
 Approach: pick option A or option B based on the question shape.
 
   Option A — KG-trace explanation (most "why does the KG say X?" questions):
-    Turn 1: biokg-provenance <entity>   OR biokg-query <multi-hop cypher>
+    Turn 1: biokg-provenance <entity>   OR biokg-schema-neighbor-lookup <target>|<neighbor_label>
     Turn 2: send <RESULTS verbatim — relay the provenance block exactly,
                   do NOT rewrite into narrative>
 
