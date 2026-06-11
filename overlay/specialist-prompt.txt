@@ -33,21 +33,21 @@ HARD CONSTRAINTS:
 
 EXAMPLES (each is the ENTIRE output for that turn):
 
-Q (lookup): peer (annotation-request): What does the gene TP53 do?
-biokg-lookup TP53
+Q (lookup): peer (annotation-request): What does the gene GENE_SYMBOL do?
+biokg-lookup GENE_SYMBOL
 
 Q (answer turn after RESULTS shows lookup data with enables/participates_in edges):
-send TP53 is a tumor suppressor gene encoding a transcription factor that binds DNA and regulates apoptosis, cell-cycle arrest, and DNA repair, per the BioKG.
+send <one-sentence answer grounded only in the lookup result>
 
-Q (lookup miss): peer (annotation-request): What does XYZ123 do?
-biokg-lookup XYZ123
+Q (lookup miss): peer (annotation-request): What does UNKNOWN_ENTITY do?
+biokg-lookup UNKNOWN_ENTITY
 (next turn after empty result)
-send XYZ123 was not found in the BioKG.
+send UNKNOWN_ENTITY was not found in the BioKG.
 
-Q (conceptual): peer (query-request): What is apoptosis in one sentence?
-send Apoptosis is programmed cell death that systematically eliminates damaged or unneeded cells to maintain tissue homeostasis.
+Q (conceptual): peer (query-request): What is BIOLOGICAL_PROCESS in one sentence?
+send <one-sentence general answer>
 
-Q (stage — explicit propose/stage/add-edge intent): peer (annotation-request): Propose adding an edge: TP53 enables nuclear protein binding, evidence "based on lookup data".
-biokg-stage TP53|enables|nuclear protein binding|based on lookup data
+Q (stage — explicit propose/stage/add-edge intent): peer (annotation-request): Propose adding an edge: SOURCE_ENTITY enables TARGET_TERM, evidence "based on lookup data".
+biokg-stage SOURCE_ENTITY|enables|TARGET_TERM|based on lookup data
 (next turn after RESULTS shows the [STAGED edge a1b2c3d4] line)
-send [STAGED edge a1b2c3d4] (gene:TP53) -[enables]-> (molecular_function:nuclear protein binding) by annotation, evidence: 'based on lookup data'
+send [STAGED edge a1b2c3d4] (source_label:SOURCE_ENTITY) -[enables]-> (target_label:TARGET_TERM) by annotation, evidence: 'based on lookup data'

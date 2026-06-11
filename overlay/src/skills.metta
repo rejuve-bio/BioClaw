@@ -17,25 +17,25 @@
     ;PEER AGENTS:
     "- Delegate a sub-task to a specialist agent and wait for its reply."
     "  Format: ask-agent ROLE|QUERY    (ROLE and QUERY separated by a pipe)"
-    "  ROLE is one of: query, annotation"
+    "  ROLE is one of: assistant, reasoner"
     "  Do NOT wrap the whole thing in quotes. Do NOT escape quotes inside QUERY."
     "  The call returns a string starting with [ROLE-agent replied ...]: <text>."
     "  When you see that result, your NEXT action MUST be: send <text>"
-    "  Example call:    ask-agent annotation|Annotate gene TP53 with function tumor suppressor"
-    "  Example follow-up: send Annotation: TP53 acts as a tumor suppressor by ..."
+    "  Example call:    ask-agent assistant|What does GENE_SYMBOL do?"
+    "  Example follow-up: send <specialist reply>"
     ;BIO KNOWLEDGE GRAPH (read):
     "- Look up a biological entity by name in the BioKG. Single argument: biokg-lookup NAME"
     "  Returns a connectivity summary (labels + connected entities) or a 'not found' message."
     "  Use this BEFORE answering a biology question about a specific gene/protein/pathway/disease."
-    "  Example: biokg-lookup TP53"
+    "  Example: biokg-lookup GENE_SYMBOL"
     "- Run a raw query against the BioKG (Cypher when backend is Neo4j). Single argument: biokg-query QUERY_STRING"
     "  Use only when biokg-lookup is insufficient (e.g. multi-hop traversal)."
-    "  Example: biokg-query MATCH (g:gene)-[:is_implicated_in]->(d:disease {name:'breast cancer'}) RETURN g.symbol LIMIT 10"
+    "  Example: biokg-query MATCH (g:gene)-[r]->(m) RETURN g, r, m LIMIT 10"
     ;BIO KNOWLEDGE GRAPH (write — staging + human approval):
     "- Propose a NEW edge into the BioKG staging area. Format: biokg-stage SOURCE|EDGE_TYPE|TARGET|EVIDENCE"
     "  Pipe-separated single argument. SOURCE and TARGET must already exist in BioKG. EVIDENCE is a brief justification."
     "  Returns a line starting with [STAGED edge <id>]. The proposal is NOT in BioKG yet — it must be approved by a human first."
-    "  Example: biokg-stage TP53|enables|nucleic acid binding|inferred from KG lookup"
+    "  Example: biokg-stage SOURCE_ENTITY|EDGE_TYPE|TARGET_ENTITY|brief evidence"
     "- List all pending proposals: biokg-list-staging (no argument)"
     "- Promote a proposal into the BioKG (Conductor only, AFTER human approval): biokg-promote STAGING_ID"
     "  Example: biokg-promote a1b2c3d4"
@@ -47,7 +47,7 @@
     "    [BioCypher: edge source=GO Annotation File (GAF) <url>; db_ref=PMID:...; evidence_code=IDA; reference=...; target source=Gene Ontology <url>] — for BioCypher-loaded edges"
     "    [BioClaw: proposed by AGENT on DATE; status=...; promoted_at=...; evidence=...] — for specialist-proposed edges"
     "  Source tokens are auto-resolved via the data-source registry to their full name + URL."
-    "  Example: biokg-provenance TP53"
+    "  Example: biokg-provenance ENTITY_NAME"
     "- Resolve a single BioCypher data-source token (e.g. 'gaf', 'GENCODE') into name + URL: biokg-source SOURCE_KEY"
     "  Use when you have a source string from a provenance result and want the canonical URL/version."
     "  Example: biokg-source gaf"
@@ -65,18 +65,28 @@
     "  evidence agrees, drifts toward middle frequency when sources disagree."
     "  Use whenever the user asks to reconcile, merge, or check contradictions"
     "  among multiple sources for the same fact."
-    "  Example: biokg-pln-evidence-merge TP53|enables|nucleic acid binding"
-    "- Cross-method consensus for a single TARGET: aggregate ALL edges of an"
-    "  edge type incident to TARGET, group by `source`, compute per-source mean"
-    "  confidence, then PLN-merge across sources."
-    "  Format: biokg-pln-source-aggregate TARGET_NAME|EDGE_TYPE"
+    "  Example: biokg-pln-evidence-merge SOURCE_ENTITY|EDGE_TYPE|TARGET_ENTITY"
+    "- Cross-method consensus for a single TARGET: aggregate edges of an"
+    "  edge type incident to TARGET, optionally restricted to a neighboring"
+    "  node label, group by `source`, compute per-source mean confidence,"
+    "  then PLN-merge across sources."
+    "  Format: biokg-pln-source-aggregate TARGET_NAME|EDGE_TYPE[|NEIGHBOR_LABEL]"
     "  Use when multiple methods answer the same biological question about a"
     "  target but identify different specific edges (no per-edge overlap). For"
-    "  example: 'is BRCA1 enhancer-regulated, integrating PEREGRINE + Enhancer"
-    "  Atlas?' PEREGRINE finds proximal enhancers, EA finds distal — different"
+    "  example: 'is TARGET_ENTITY enhancer-regulated, integrating multiple"
+    "  regulatory sources?' One source may find proximal enhancers and another may find distal enhancers — different"
     "  edges but both methods say YES with quantifiable confidence. PLN merge"
     "  produces one cross-method confidence number."
-    "  Example: biokg-pln-source-aggregate BRCA1|associated_with"
+    "  Example: biokg-pln-source-aggregate TARGET_ENTITY|associated_with|enhancer"
+    "- Schema-derived source aggregate. Format: biokg-pln-schema-neighbor-aggregate TARGET_NAME|NEIGHBOR_LABEL"
+    "  Resolves TARGET_NAME's node label, finds the schema edge connecting it to"
+    "  NEIGHBOR_LABEL, then runs the same source aggregate with that edge and"
+    "  neighbor-label filter. Use this for natural relationship phrases when"
+    "  the edge type is implied by the loaded schema."
+    "- Inspect schema mapping for a target entity and neighboring node label: biokg-schema-neighbor TARGET_NAME|NEIGHBOR_LABEL"
+    "  Returns the resolved node labels, schema edge, and accepted aliases."
+    "- Schema-derived direct annotation summary: biokg-schema-neighbor-lookup TARGET_NAME|NEIGHBOR_LABEL"
+    "  Lists compact examples for direct edges between TARGET_NAME and that neighboring node type."
     ;CODE EXECUTION:
     "- Execute MeTTa expression: metta sexpression"
     "Example to invoke Non-Axiomatic Logic via MeTTa: "
@@ -144,6 +154,12 @@
 (= (biokg-schema)
    (py-call (biokg.describe_schema)))
 
+(= (biokg-schema-neighbor $combined)
+   (py-call (biokg.schema_neighbor_pipe $combined)))
+
+(= (biokg-schema-neighbor-lookup $combined)
+   (py-call (biokg.schema_neighbor_lookup_pipe $combined)))
+
 (= (biokg-provenance $name)
    (py-call (biokg.provenance $name)))
 
@@ -158,6 +174,18 @@
 
 (= (biokg-pln-source-aggregate $combined)
    (py-call (biokg.pln_source_aggregate_pipe $combined)))
+
+(= (biokg-pln-schema-neighbor-aggregate $combined)
+   (py-call (biokg.pln_schema_neighbor_aggregate_pipe $combined)))
+
+(= (biokg-pln-chain-confidence $combined)
+   "That formal reasoning skill is planned for Phase 2; Phase 1 currently supports per-edge evidence merge and cross-method aggregate.")
+
+(= (biokg-pln-compose-belief $question)
+   "That formal reasoning skill is planned for Phase 2; Phase 1 currently supports per-edge evidence merge and cross-method aggregate.")
+
+(= (biokg-nal-hypothesize $entity)
+   "That formal reasoning skill is planned for Phase 2; Phase 1 currently supports per-edge evidence merge and cross-method aggregate.")
 
 !(import_prolog_functions_from_file (library OmegaClaw-Core ./src/skills.pl) (shell first_char))
 

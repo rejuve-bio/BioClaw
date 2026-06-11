@@ -44,7 +44,6 @@ ontology term:
       type: str
       biolink: source_web_page
 
-# ─── Nodes loaded today ─────────────────────────────────────────────────────
 gene:
   represented_as: node
   preferred_id: ensemble
@@ -209,7 +208,6 @@ enhancer:
       type: str
       biolink: source_web_page
 
-# ─── Edges loaded today ─────────────────────────────────────────────────────
 transcribes to:
   represented_as: edge
   is_a: expression
@@ -326,6 +324,38 @@ enhancer to gene association:
       type: float
       biolink: has_quantitative_value
     biological_context:
+      type: str
+    source:
+      type: str
+      biolink: knowledge_source
+    source_url:
+      type: str
+      biolink: source_web_page
+
+gene to disease association:
+  description: >-
+    An association between a gene and a disease identifier, such as OMIM or ORPHA.
+    From Human Phenotype Ontology.
+  is_a: association
+  mixins: [biolink:GeneToDiseaseAssociation]
+  biolink_predicate: "biolink:associated_with"
+  inherit_properties: true
+  represented_as: edge
+  input_label: gene_disease
+  output_label: associated_with
+  source: gene
+  target: disease
+  kgx_properties:
+    subject_category: "biolink:Gene"
+    object_category: "biolink:Disease"
+    knowledge_level: "knowledge_assertion"
+    agent_type: "manual_agent"
+  properties:
+    gene_symbol:
+      type: str
+    association_type:
+      type: str
+    source_ref:
       type: str
     source:
       type: str

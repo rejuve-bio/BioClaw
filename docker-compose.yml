@@ -36,6 +36,7 @@ x-common-env: &common-env
   BIOCLAW_IRC_AUTH_REQUIRED: ${BIOCLAW_IRC_AUTH_REQUIRED:-false}
   BIOCLAW_PEER_TIMEOUT: ${BIOCLAW_PEER_TIMEOUT:-300}
   MORK_URI: ${MORK_URI:-}
+  MORK_NAMESPACE: ${MORK_NAMESPACE:-default}
 
 services:
   conductor:
@@ -76,6 +77,13 @@ services:
       - "IRC_port=${IRC_PORT:-6667}"
       - "IRC_user=${IRC_USER:-bioclaw}"
     volumes:
+      # Full lib_llm_ext.py (image's in-built version is a 3 KB stub missing
+      # callProvider — runtime git-import was the only thing restoring it,
+      # and that path is unreliable. Track the working copy here.)
+      - ./overlay/lib_llm_ext.py:/PeTTa/repos/OmegaClaw-Core/lib_llm_ext.py:ro
+      # Patched main loop: rephrases the spam-shield directive so weaker LLMs
+      # stop verbally acknowledging it instead of relaying RESULTS.
+      - ./overlay/core/loop.metta:/PeTTa/repos/OmegaClaw-Core/src/loop.metta:ro
       - conductor-memory:/PeTTa/repos/OmegaClaw-Core/memory
     tmpfs:
       - /tmp:size=64m,mode=1777
@@ -107,6 +115,8 @@ services:
       - "RPC_ROLE=assistant"
       - "RPC_PORT=8080"
     volumes:
+      - ./overlay/lib_llm_ext.py:/PeTTa/repos/OmegaClaw-Core/lib_llm_ext.py:ro
+      - ./overlay/core/loop.metta:/PeTTa/repos/OmegaClaw-Core/src/loop.metta:ro
       - assistant-memory:/PeTTa/repos/OmegaClaw-Core/memory
     tmpfs:
       - /tmp:size=64m,mode=1777
@@ -137,6 +147,8 @@ services:
       - "RPC_ROLE=reasoner"
       - "RPC_PORT=8080"
     volumes:
+      - ./overlay/lib_llm_ext.py:/PeTTa/repos/OmegaClaw-Core/lib_llm_ext.py:ro
+      - ./overlay/core/loop.metta:/PeTTa/repos/OmegaClaw-Core/src/loop.metta:ro
       - reasoner-memory:/PeTTa/repos/OmegaClaw-Core/memory
     tmpfs:
       - /tmp:size=64m,mode=1777

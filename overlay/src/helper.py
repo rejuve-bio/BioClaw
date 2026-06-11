@@ -76,7 +76,7 @@ def normalize_string(x):
 #   - {}, [], (), or other empty fragments
 #
 # Without preprocessing, these get treated as skill calls to fictional skills
-# (e.g. `TP53` or `[TOOL_CALL]`), producing garbage COMMAND_RETURNs that
+# (e.g. an entity symbol or `[TOOL_CALL]`), producing garbage COMMAND_RETURNs that
 # pollute the agent's history and trigger ERROR_FEEDBACK loops.
 #
 # Strategy:
@@ -106,10 +106,11 @@ KNOWN_SKILLS = {
     # BioClaw biokg-* skills (full surface — covers Phase 1 + planned skills)
     "biokg-lookup", "biokg-query",
     "biokg-stage", "biokg-list-staging", "biokg-promote", "biokg-reject",
-    "biokg-schema",
+    "biokg-schema", "biokg-schema-neighbor", "biokg-schema-neighbor-lookup",
     "biokg-provenance", "biokg-source",
     "biokg-recent-autonomous",
     "biokg-pln-evidence-merge", "biokg-pln-source-aggregate",
+    "biokg-pln-schema-neighbor-aggregate",
     "biokg-pln-chain-confidence", "biokg-pln-compose-belief",
     "biokg-nal-hypothesize",
     # MeTTa eval (raw NAL/PLN escape hatch)
@@ -141,6 +142,7 @@ _DROP_LINE_PATTERNS = [
     re.compile(r"^\s*\(?\s*empty\s*\)?\s*$", re.IGNORECASE),    # empty / (empty)
     re.compile(r"^\s*\(?\s*none\s*\)?\s*$", re.IGNORECASE),     # none / (none)
     re.compile(r"^\s*\(?\s*null\s*\)?\s*$", re.IGNORECASE),     # null / (null)
+    re.compile(r"^\s*\(?\s*no\s+output\s*\)?\s*$", re.IGNORECASE),  # no output / (no output)
     re.compile(r"^\s*\{\s*\"name\"\s*:\s*\".*?\"\s*,?\s*"),    # {"name": "...",
     re.compile(r"^\s*\"name\"\s*:"),                           # leftover "name":
     re.compile(r"^\s*\"arguments\"\s*:"),                      # leftover "arguments":
@@ -176,7 +178,14 @@ _SPAM_PATTERNS = [
 
 # Internal-monologue starters — the LLM thinking out loud rather than producing
 # user-facing content. Drop sends that begin with these.
+#
+# Also catches LLM "acknowledgment" patterns where the model verbally responds
+# to a system directive (e.g. " DO NOT RE-SEND OR SPAM!" spam-shield feedback)
+# instead of doing the next skill call. With weak/medium LLMs (Minimax,
+# DeepSeek-chat, DeepSeek-reasoner) this is a major failure mode — the model
+# answers feedback as if it were a user instruction, blocking real work.
 _MONOLOGUE_STARTS = (
+    # — original internal-monologue patterns —
     "i should ",
     "i need to ",
     "i will ",
@@ -187,6 +196,7 @@ _MONOLOGUE_STARTS = (
     "based on the ",
     "according to ",
     "the instruction ",
+    "the user is asking",
     "the user's message",
     "the user said",
     "the previous request",
@@ -200,8 +210,47 @@ _MONOLOGUE_STARTS = (
     "no output - ",
     "no output -",
     "no output: ",
+    "no output",
     "(no output",
     "(empty turn",
+    # — acknowledgment patterns — LLM responding verbally instead of acting —
+    "acknowledged.",
+    "acknowledged,",
+    "understood.",
+    "understood,",
+    "noted.",
+    "noted,",
+    "got it.",
+    "got it,",
+    "i understand.",
+    "i understand,",
+    "i'll wait",
+    "i will wait",
+    "i'm ready",
+    "i am ready",
+    "i'll not",
+    "i will not re-send",
+    "i will not spam",
+    "okay!",
+    "ok,",
+    "ok!",
+    # — meta-commentary patterns — LLM narrating what's happening in RESULTS —
+    "i see the results",
+    "i see results",
+    "we see from results",
+    "looking at the results",
+    "the results contain",
+    "results contain",
+    "from the results",
+    "in the results",
+    "the previous attempt",
+    "the previous response",
+    "the previous turn",
+    "the current request is",
+    "the current turn",
+    # — Hi-again / repeated-greeting patterns from chatty LLMs —
+    "hi again",
+    "hello again",
 )
 
 
@@ -213,6 +262,15 @@ def _looks_like_monologue(text: str) -> bool:
 def _looks_like_spam(text: str) -> bool:
     stripped = text.strip().strip('"').strip("'").strip()
     return any(p.match(stripped) for p in _SPAM_PATTERNS)
+
+
+def _is_staged_edge_reply(text: str) -> bool:
+    return "[STAGED edge " in text
+
+
+def _is_approval_instruction(text: str) -> bool:
+    lower = text.strip().lower()
+    return lower.startswith("to approve, reply:")
 
 
 def sanitize_llm_response(raw: str) -> str:
@@ -234,6 +292,7 @@ def sanitize_llm_response(raw: str) -> str:
     #    is restated 3-5 times. Hard-capping here makes the rule enforced
     #    rather than aspirational.
     send_count = 0
+    kept_staged_edge_reply = False
     out_lines = []
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -268,9 +327,15 @@ def sanitize_llm_response(raw: str) -> str:
                     continue   # drop echoed system warnings
                 if _looks_like_monologue(body_inspect):
                     continue   # drop LLM internal-monologue commentary
-                send_count += 1
-                if send_count > 1:
+                if send_count >= 1 and not (
+                    send_count == 1
+                    and kept_staged_edge_reply
+                    and _is_approval_instruction(body_inspect)
+                ):
                     continue   # already emitted one send this turn — drop the rest
+                send_count += 1
+                if _is_staged_edge_reply(body_inspect):
+                    kept_staged_edge_reply = True
             out_lines.append(raw_line)
         else:
             # Orphan prose. Auto-wrap as send so the user sees the content
@@ -373,8 +438,8 @@ def test_balance_parenthesis():
 
     # sanitizer cases
     # 1. orphan prose gets wrapped as send
-    assert balance_parentheses('TP53 is a gene with broad capabilities') == \
-        '((send "TP53 is a gene with broad capabilities"))'
+    assert balance_parentheses('GENE_SYMBOL is a gene with broad capabilities') == \
+        '((send "GENE_SYMBOL is a gene with broad capabilities"))'
     # 2. [TOOL_CALL] wrappers are stripped (inner content still parsed)
     assert balance_parentheses('[TOOL_CALL]\nsend hello\n[/TOOL_CALL]') == '((send "hello"))'
     # 3. <tool_call> wrappers are stripped
@@ -390,18 +455,18 @@ def test_balance_parenthesis():
     out = balance_parentheses('send Working on it\nResponse arrived')
     assert out == '((send "Working on it"))', f"got: {out}"
     # 7. biokg-* skill is recognized (forward-compat)
-    assert balance_parentheses('biokg-lookup TP53') == '((biokg-lookup "TP53"))'
+    assert balance_parentheses('biokg-lookup GENE_SYMBOL') == '((biokg-lookup "GENE_SYMBOL"))'
     # 8. ask-agent stays intact
-    assert balance_parentheses('ask-agent assistant|What does TP53 do?') == \
-        '((ask-agent "assistant|What does TP53 do?"))'
+    assert balance_parentheses('ask-agent assistant|What does GENE_SYMBOL do?') == \
+        '((ask-agent "assistant|What does GENE_SYMBOL do?"))'
 
     # 9. Multiple sends in one turn: keep first, drop the rest
     multi_send = balance_parentheses('send First answer\nsend Second answer\nsend Third answer')
     assert multi_send == '((send "First answer"))', f"got: {multi_send}"
 
     # 10. send + ask-agent in same turn: both pass (different skill names)
-    pair = balance_parentheses('send Working on it\nask-agent assistant|What does TP53 do?')
-    assert pair == '((send "Working on it") (ask-agent "assistant|What does TP53 do?"))', f"got: {pair}"
+    pair = balance_parentheses('send Working on it\nask-agent assistant|What does GENE_SYMBOL do?')
+    assert pair == '((send "Working on it") (ask-agent "assistant|What does GENE_SYMBOL do?"))', f"got: {pair}"
 
     # 11. Spam pattern: echoed system warning gets dropped
     spam = balance_parentheses('send DO NOT RE-SEND OR SPAM!')
@@ -428,12 +493,30 @@ def test_balance_parenthesis():
     assert forthis == '()', f"got: {forthis}"
 
     # 17. "no output - waiting for ..." status comments get dropped
-    noop = balance_parentheses('send no output - waiting for assistant reply on prior TP53 query')
+    noop = balance_parentheses('send no output - waiting for assistant reply on prior entity query')
     assert noop == '()', f"got: {noop}"
 
     # 18. "(no output - ..." parenthesized comments get dropped
     noop2 = balance_parentheses('(no output - no new HUMAN_MESSAGE)')
     assert noop2 == '()', f"got: {noop2}"
+
+    # 19. Bare "(no output)" from Minimax idle turns is dropped.
+    noop3 = balance_parentheses('(no output)')
+    assert noop3 == '()', f"got: {noop3}"
+
+    # 20. Meta-analysis prose from Minimax idle turns is dropped.
+    meta = balance_parentheses('send The user is asking me to analyze the situation and provide the correct output.')
+    assert meta == '()', f"got: {meta}"
+
+    # 21. Staged-edge replies intentionally need a second approval instruction.
+    staged = balance_parentheses(
+        'send [STAGED edge a1b2c3d4] (source_label:SOURCE_ENTITY) -[EDGE_TYPE]-> (target_label:TARGET_ENTITY)\n'
+        'send To approve, reply: approve a1b2c3d4. To reject, reply: reject a1b2c3d4.'
+    )
+    assert staged == (
+        '((send "[STAGED edge a1b2c3d4] (source_label:SOURCE_ENTITY) -[EDGE_TYPE]-> (target_label:TARGET_ENTITY)") '
+        '(send "To approve, reply: approve a1b2c3d4. To reject, reply: reject a1b2c3d4."))'
+    ), f"got: {staged}"
 
 
 if __name__ == "__main__":

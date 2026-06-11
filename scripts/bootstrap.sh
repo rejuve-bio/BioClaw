@@ -158,13 +158,18 @@ for role in annotation conductor relation provenance; do
   printf "    %-12s in prompt: %s\n" "$role" "$c"
 done
 
-say "biokg sanity (TP53 lookup)"
-docker exec bioclaw-conductor python3 -c "
-import sys; sys.path.insert(0,'/PeTTa/repos/OmegaClaw-Core/src')
+if [ -n "${BIOCLAW_SANITY_LOOKUP_ENTITY:-}" ]; then
+  say "biokg sanity (${BIOCLAW_SANITY_LOOKUP_ENTITY} lookup)"
+  docker exec -e BIOCLAW_SANITY_LOOKUP_ENTITY="$BIOCLAW_SANITY_LOOKUP_ENTITY" bioclaw-conductor python3 -c "
+import os, sys; sys.path.insert(0,'/PeTTa/repos/OmegaClaw-Core/src')
 import biokg
-out = biokg.lookup('TP53')
+entity = os.environ['BIOCLAW_SANITY_LOOKUP_ENTITY']
+out = biokg.lookup(entity)
 print(out[:600] + ('...\n[truncated]' if len(out) > 600 else ''))
 " | sed 's/^/    /'
+else
+  say "biokg sanity lookup skipped (set BIOCLAW_SANITY_LOOKUP_ENTITY to enable)"
+fi
 
 echo
 say "Bootstrap complete."

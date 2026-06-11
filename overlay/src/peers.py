@@ -5,6 +5,7 @@ Peer endpoints are configured via the BIOCLAW_PEERS env var, e.g.
 """
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 
@@ -28,6 +29,131 @@ def _peers():
     return out
 
 
+def _relay(role: str, reply: str) -> str:
+    reply = _flatten_for_relay(reply)
+    try:
+        max_chars = int(os.environ.get("BIOCLAW_RELAY_MAX_CHARS", "1500"))
+    except (TypeError, ValueError):
+        max_chars = 1500
+    if max_chars > 0 and len(reply) > max_chars:
+        omitted = len(reply) - max_chars
+        reply = reply[:max_chars] + f" ... [+{omitted} more chars truncated for relay]"
+    return f"[{role}-agent replied — relay this verbatim to the user with the send command]: {reply}"
+
+
+def _reasoner_fast_path(query: str):
+    """Handle deterministic ReasonerOC templates without an extra LLM hop.
+
+    Minimax can take minutes or emit idle chatter on simple routing decisions.
+    These templates already map one-to-one to BioKG reasoning skills, so the
+    Conductor can call the skill directly while preserving the same relay shape.
+    """
+    q = str(query).strip()
+    q_norm = re.sub(r"\s+", " ", q).strip()
+    q_lower = q_norm.lower().rstrip("?.!")
+
+    aggregate = _source_aggregate_request(q_norm)
+    if aggregate:
+        import biokg
+        mode, values = aggregate
+        if mode == "schema-neighbor":
+            return biokg.pln_schema_neighbor_aggregate_pipe("|".join(values))
+        return biokg.pln_source_aggregate_pipe("|".join(values))
+
+    # "reconcile SOURCE EDGE_TYPE TARGET" -> SOURCE|EDGE_TYPE|TARGET
+    for prefix in ("reconcile ", "merge evidence for "):
+        if q_lower.startswith(prefix):
+            body = q_norm[len(prefix):].strip()
+            parts = body.split(maxsplit=2)
+            if len(parts) == 3:
+                source, edge_type, target = parts
+                import biokg
+                return biokg.pln_evidence_merge_pipe(f"{source}|{edge_type}|{target}")
+
+    return None
+
+
+def _source_aggregate_request(text: str):
+    q = re.sub(r"\s+", " ", str(text)).strip().rstrip("?.!")
+    m = re.match(
+        r"^(?:source[-\s]?aggregate|aggregate sources|aggregate evidence|cross-method confidence|consensus)"
+        r"\s+(?:for|on)\s+(.+?)\s+(?:via|using)\s+([A-Za-z_][A-Za-z0-9_]*)"
+        r"(?:\s+(?:through|with|neighbor)\s+([A-Za-z][A-Za-z0-9_\-\s]*))?$",
+        q,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        target, edge_type, neighbor = m.groups()
+        values = [target.strip(), edge_type.strip()]
+        if neighbor:
+            values.append(neighbor.strip())
+        return "edge", values
+
+    m = re.match(
+        r"^aggregate\s+([A-Za-z_][A-Za-z0-9_]*)\s+(?:for|on)\s+(.+?)"
+        r"(?:\s+(?:through|with|neighbor)\s+([A-Za-z][A-Za-z0-9_\-\s]*))?$",
+        q,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        edge_type, target, neighbor = m.groups()
+        values = [target.strip(), edge_type.strip()]
+        if neighbor:
+            values.append(neighbor.strip())
+        return "edge", values
+
+    m = re.match(
+        r"^(?:is|are)\s+(.+?)\s+([A-Za-z][A-Za-z0-9_\-\s]*?)[-\s]?(?:regulated|associated|linked|connected)$",
+        q,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        target, neighbor = m.groups()
+        return "schema-neighbor", [target.strip(), neighbor.strip()]
+    return None
+
+
+def _assistant_fast_path(query: str):
+    """Handle deterministic AssistantOC lookup templates without an LLM hop."""
+    q = str(query).strip()
+    q_norm = re.sub(r"\s+", " ", q).strip()
+    q_lower = q_norm.lower().rstrip("?.!")
+
+    patterns = (
+        r"^what\s+does\s+(.+?)\s+do$",
+        r"^tell\s+me\s+about\s+(.+)$",
+        r"^what\s+is\s+(.+)$",
+        r"^show\s+me\s+(.+)$",
+    )
+    for pattern in patterns:
+        m = re.match(pattern, q_lower)
+        if not m:
+            continue
+        # Preserve original capitalization where possible by slicing the
+        # normalized query with the same simple prefix/suffix structure.
+        entity = _extract_lookup_entity(q_norm, pattern, m.group(1))
+        if entity:
+            import biokg
+            return biokg.lookup(entity)
+    return None
+
+
+def _extract_lookup_entity(q_norm: str, pattern: str, lower_entity: str) -> str:
+    # The user mostly asks compact biomedical symbols; for those, find the
+    # case-preserved token span in the normalized query. Fall back to the
+    # lowercased regex capture when necessary.
+    words = q_norm.rstrip("?.!").split()
+    if pattern.startswith("^what\\s+does") and len(words) >= 4:
+        return " ".join(words[2:-1]).strip()
+    if pattern.startswith("^tell\\s+me\\s+about") and len(words) >= 4:
+        return " ".join(words[3:]).strip()
+    if pattern.startswith("^what\\s+is") and len(words) >= 3:
+        return " ".join(words[2:]).strip()
+    if pattern.startswith("^show\\s+me") and len(words) >= 3:
+        return " ".join(words[2:]).strip()
+    return str(lower_entity).strip()
+
+
 def ask(role, query, timeout=None):
     """Synchronously ask a peer specialist agent and return its reply text."""
     role = str(role).strip().lower()
@@ -38,6 +164,16 @@ def ask(role, query, timeout=None):
         return "error: role is required"
     if not query:
         return "error: query is required"
+
+    if _truthy(os.environ.get("BIOCLAW_CONDUCTOR_PEER_FAST_PATH", "false")):
+        if role == "reasoner":
+            reply = _reasoner_fast_path(query)
+            if reply is not None:
+                return _relay(role, reply)
+        elif role == "assistant":
+            reply = _assistant_fast_path(query)
+            if reply is not None:
+                return _relay(role, reply)
 
     peers = _peers()
     base = peers.get(role)
@@ -64,34 +200,16 @@ def ask(role, query, timeout=None):
             user_msg = f"Sorry, {role} took too long to respond. Please try the question again."
         else:
             user_msg = f"Sorry, {role} returned an error (HTTP {exc.code}). Please try again."
-        return f"[{role}-agent replied — relay this verbatim to the user with the send command]: {user_msg}"
+        return _relay(role, user_msg)
     except (urllib.error.URLError, TimeoutError) as exc:
         user_msg = f"Sorry, could not reach {role}. Please try again in a moment."
-        return f"[{role}-agent replied — relay this verbatim to the user with the send command]: {user_msg}"
+        return _relay(role, user_msg)
 
     reply = payload.get("reply", "")
     if not reply:
         user_msg = f"Sorry, {role} returned an empty reply. Please try again."
-        return f"[{role}-agent replied — relay this verbatim to the user with the send command]: {user_msg}"
-    # Flatten newlines to literal '\n' so the conductor's LLM sees a
-    # single-line string. Weak LLMs (Minimax) hallucinate fake nested skill
-    # calls when they see multi-line structure they have to relay. The IRC /
-    # Telegram channel adapter converts the '\n' literal back into real
-    # newlines on the way out (same convention as internal_rpc.send_message).
-    reply = _flatten_for_relay(reply)
-    # Hard-cap relay payload to keep the conductor's LLM able to emit a clean
-    # single `send <reply>` line. Without this, hub-entity responses (e.g.
-    # `biokg-provenance BRCA1` returning ~30 edges of provenance) routinely
-    # exceed the LLM's reliable single-token-output window and the relay step
-    # silently fails. Override via BIOCLAW_RELAY_MAX_CHARS (default 1500).
-    try:
-        max_chars = int(os.environ.get("BIOCLAW_RELAY_MAX_CHARS", "1500"))
-    except (TypeError, ValueError):
-        max_chars = 1500
-    if max_chars > 0 and len(reply) > max_chars:
-        omitted = len(reply) - max_chars
-        reply = reply[:max_chars] + f" ... [+{omitted} more chars truncated for relay]"
-    return f"[{role}-agent replied — relay this verbatim to the user with the send command]: {reply}"
+        return _relay(role, user_msg)
+    return _relay(role, reply)
 
 
 def _flatten_for_relay(text: str) -> str:
@@ -104,10 +222,18 @@ def _flatten_for_relay(text: str) -> str:
     return text.replace("\r\n", "\\n").replace("\r", "\\n").replace("\n", "\\n")
 
 
+def _truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().strip('"').strip("'").strip()
+    normalized = re.sub(r"[^a-z0-9]+", "", text.lower())
+    return normalized in {"true", "1", "t", "yes"}
+
+
 def ask_pipe(combined):
     """Single-arg form for LLMs that struggle to emit two quoted args.
 
-    Format: ROLE|QUERY  e.g.  annotation|Annotate gene TP53 with function tumor suppressor
+    Format: ROLE|QUERY  e.g.  assistant|What does GENE_SYMBOL do?
     Falls back to colon and whitespace separators. Strips leading/trailing
     quotes from the query (LLMs often wrap the whole arg in quotes).
     """
@@ -123,7 +249,7 @@ def ask_pipe(combined):
             role, query = parts
         else:
             return ("error: could not parse ask-agent argument. Use one of these forms:\n"
-                    "  ask-agent annotation|Annotate TP53 with tumor suppressor\n"
-                    "  ask-agent annotation \"Annotate TP53 with tumor suppressor\"")
+                    "  ask-agent assistant|What does GENE_SYMBOL do?\n"
+                    "  ask-agent reasoner|Reconcile SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY")
 
     return ask(role.strip(), query.strip().strip('"').strip("'").strip())

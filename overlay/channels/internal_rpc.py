@@ -11,6 +11,8 @@ the same way.
 import json
 import os
 import queue
+import re
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -113,8 +115,16 @@ class _Handler(BaseHTTPRequestHandler):
         timeout = float(payload.get("timeout", 60))
 
         slot = _ResponseSlot()
-        # Tag with role so the agent prompt sees it as a peer call
-        framed = f"peer ({_role}-request): {text}"
+        # Tag with role so the agent prompt sees it as a peer call. Include a
+        # unique request marker so repeated identical queries are still new
+        # OmegaClaw messages; specialists strip the marker before parsing.
+        framed = f"peer ({_role}-request): [request {time.time_ns()}] {text}"
+
+        direct_reply = _deterministic_reply(framed)
+        if direct_reply:
+            self._json(200, {"reply": direct_reply, "role": _role})
+            return
+
         _inbox.put((framed, slot))
 
         reply = slot.wait(timeout=timeout)
@@ -141,6 +151,54 @@ def _serve():
     print(f"[INTERNAL_RPC:{_role}] Listening on 0.0.0.0:{_port}")
     while _running:
         server.handle_request()
+
+
+def _truthy(value):
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().strip('"').strip("'").strip()
+    normalized = re.sub(r"[^a-z0-9]+", "", text.lower())
+    return normalized in {"true", "1", "t", "yes"}
+
+
+def _deterministic_reply(framed_text):
+    """Run deterministic specialist routes inside the specialist process.
+
+    This prevents stale OmegaClaw loop output from being attached to a later
+    HTTP request for supported BioClaw intents. Unsupported requests still go
+    through the normal agent loop, preserving the LLM/memory fallback path.
+    """
+    if not _truthy(os.environ.get("BIOCLAW_RPC_DETERMINISTIC_FAST_PATH", "true")):
+        return ""
+    if _role not in {"assistant", "reasoner"}:
+        return ""
+    src_dirs = [
+        "/PeTTa/repos/OmegaClaw-Core/src",
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")),
+    ]
+    for src_dir in src_dirs:
+        if src_dir not in sys.path:
+            sys.path.insert(0, src_dir)
+    try:
+        import router
+        command = router.route_specialist_message(_role, framed_text)
+    except Exception as exc:
+        print(f"[INTERNAL_RPC:{_role}] deterministic route failed: {exc}")
+        return ""
+    reply = _send_command_text(command)
+    if reply:
+        print(f"[INTERNAL_RPC:{_role}] deterministic reply: {reply[:160]}")
+    return reply
+
+
+def _send_command_text(command):
+    """Extract user-facing text from a `send ...` command string."""
+    lines = [line.strip() for line in str(command or "").splitlines() if line.strip()]
+    out = []
+    for line in lines:
+        if line.startswith("send "):
+            out.append(line[5:].strip())
+    return "\n".join(out)
 
 
 def _finalize_loop():
