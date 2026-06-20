@@ -7,6 +7,50 @@ def _log_raw(provider: str, model: str, raw: str) -> None:
     print(f"[LLM_RAW] ts={ts} provider={provider} model={model} chars={len(raw or '')} raw={raw!r}")
 
 
+def _extract_chat_text(response, provider: str, model: str) -> str:
+    """Extract assistant text from OpenAI-compatible chat responses.
+
+    Some OpenRouter models can return `message.content=None` when reasoning
+    output or provider quirks are involved. Return an empty string instead of
+    crashing, and log finish metadata so the caller can fall back cleanly.
+    """
+    try:
+        choice = response.choices[0]
+        message = choice.message
+    except Exception as exc:
+        print(f"[LLM_RAW] provider={provider} model={model} malformed response: {exc}")
+        return ""
+
+    content = getattr(message, "content", None)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                val = item.get("text") or item.get("content")
+                if isinstance(val, str):
+                    parts.append(val)
+            else:
+                val = getattr(item, "text", None) or getattr(item, "content", None)
+                if isinstance(val, str):
+                    parts.append(val)
+        if parts:
+            return "\n".join(parts)
+
+    finish = getattr(choice, "finish_reason", None)
+    refusal = getattr(message, "refusal", None)
+    reasoning = getattr(message, "reasoning", None) or getattr(message, "reasoning_content", None)
+    usage = getattr(response, "usage", None)
+    print(
+        f"[LLM_RAW] provider={provider} model={model} empty content "
+        f"finish_reason={finish!r} refusal={refusal!r} "
+        f"reasoning_present={bool(reasoning)} usage={usage!r}",
+        flush=True,
+    )
+    return ""
+
+
 class AbstractAIProvider:
     def __init__(self, name: str):
         self._name = name
@@ -72,7 +116,7 @@ class AIProvider(AbstractAIProvider):
                 **kwargs
             )
 
-            raw = response.choices[0].message.content
+            raw = _extract_chat_text(response, self._name, self._model_name)
             _log_raw(self._name, self._model_name, raw)
             return self._clean_text(raw)
         except Exception as e:
@@ -81,7 +125,7 @@ class AIProvider(AbstractAIProvider):
 
     def _clean_text(self, text: str) -> str:
         """Unescape special characters."""
-        return text.replace("_quote_", '"').replace("_apostrophe_", "'")
+        return str(text or "").replace("_quote_", '"').replace("_apostrophe_", "'")
 
 
 class AsiOneProvider(AIProvider):
@@ -118,6 +162,41 @@ class AsiOneProvider(AIProvider):
             return resp
         except Exception as e:
             print(f"[lib_llm_ext.ASIOneProvider.chat] Exception while communicating with LLM: {e}")
+            return ""
+
+
+class OpenRouterProvider(AIProvider):
+    """OpenRouter provider pinned to a specific model.
+
+    BioClaw uses OpenRouter mainly for grounded answer formatting. Ask
+    OpenRouter not to include reasoning tokens in the response so
+    message.content is more likely to contain the final answer.
+    """
+
+    def chat(self, content: str, max_tokens: int = 6000, reasoning: str = "medium", **kwargs) -> str:
+        self._ensure_client()
+
+        if self._client is None:
+            raise RuntimeError(f"{self.name} not configured (set {self._var_name})")
+
+        content = content.replace(":-:-:-:", " ")
+        extra_body = kwargs.pop("extra_body", {}) or {}
+        extra_body.setdefault("reasoning", {"exclude": True})
+        kwargs.setdefault("temperature", 0.2)
+        try:
+            response = self._client.chat.completions.create(
+                model=self._model_name,
+                messages=[{"role": "user", "content": content}],
+                max_tokens=max_tokens,
+                extra_body=extra_body,
+                **kwargs,
+            )
+
+            raw = _extract_chat_text(response, self._name, self._model_name)
+            _log_raw(self._name, self._model_name, raw)
+            return self._clean_text(raw)
+        except Exception as e:
+            print(f"[lib_llm_ext.OpenRouterProvider.chat] Exception while communicating with LLM: {e}")
             return ""
 
 
@@ -196,7 +275,7 @@ _register_provider(name="ASICloud", var_name="ASI_API_KEY", model_name="minimax/
 _register_provider(name="Anthropic", var_name="ANTHROPIC_API_KEY", model_name="claude-opus-4-6", base_url="https://api.anthropic.com/v1/")
 _register_provider(name="Ollama-local", var_name="OLLAMA_API_KEY", model_name="qwen3.5:9b", base_url="http://localhost:11434/v1")
 _register_provider_instance(AsiOneProvider(name="ASIOne", var_name="ASIONE_API_KEY", model_name="asi1-ultra", base_url="https://api.asi1.ai/v1"))
-_register_provider(name="OpenRouter", var_name="OPENROUTER_API_KEY", model_name="z-ai/glm-5.1", base_url="https://openrouter.ai/api/v1")
+_register_provider_instance(OpenRouterProvider(name="OpenRouter", var_name="OPENROUTER_API_KEY", model_name="z-ai/glm-5.1", base_url="https://openrouter.ai/api/v1"))
 _register_provider_instance(TestProvider())
 _register_provider_instance(OpenAIProvider(name="OpenAI", var_name="OPENAI_API_KEY", model_name="gpt-5.4", base_url="https://api.openai.com/v1"))
 
@@ -228,6 +307,5 @@ def useLocalEmbedding(atom):
         atom,
         normalize_embeddings=True
     ).tolist()
-
 
 
