@@ -151,7 +151,7 @@ def _llm_rewrite_grounded(role: str, tool_call: str, user_text: str, raw: str, d
         return deterministic
 
     answer = _strip_llm_answer(answer)
-    if not answer:
+    if not answer or _is_nullish_llm_answer(answer):
         return deterministic
     if _looks_ungrounded(answer):
         return deterministic
@@ -170,6 +170,8 @@ Rules:
 - Preserve caveats: enhancer association is not causal proof; IEA is electronically inferred; single-source means no cross-source merge.
 - If the result says no support was found, say this KG snapshot did not return support, not that biology disproves it.
 - Return only the final answer, with no bullets unless bullets make it clearer.
+- Return normal English prose, not MeTTa, Lisp, JSON, XML, or tool-call syntax.
+- Never return an empty placeholder such as (), nil, null, or N/A.
 - Keep it short enough for IRC, ideally 2-4 sentences.
 
 ROLE: {role}
@@ -188,6 +190,11 @@ def _strip_llm_answer(text: str) -> str:
     if len(answer) > 900:
         answer = answer[:900].rsplit(" ", 1)[0].rstrip() + " ..."
     return answer.strip()
+
+
+def _is_nullish_llm_answer(answer: str) -> bool:
+    compact = re.sub(r"\s+", "", str(answer or "")).lower()
+    return compact in {"", "()", "(nil)", "nil", "null", "none", "n/a", "na"}
 
 
 def _looks_ungrounded(answer: str) -> bool:
