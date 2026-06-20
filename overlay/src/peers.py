@@ -61,12 +61,19 @@ def _reasoner_fast_path(query: str):
         return biokg.pln_source_aggregate_pipe("|".join(values))
 
     # "reconcile SOURCE EDGE_TYPE TARGET" -> SOURCE|EDGE_TYPE|TARGET
-    for prefix in ("reconcile ", "merge evidence for "):
+    for prefix in (
+        "reconcile ",
+        "merge evidence for ",
+        "how confident are we about ",
+        "confidence for ",
+        "confidence on ",
+        "how strong is the evidence for ",
+    ):
         if q_lower.startswith(prefix):
             body = q_norm[len(prefix):].strip()
-            parts = body.split(maxsplit=2)
-            if len(parts) == 3:
-                source, edge_type, target = parts
+            edge = _parse_edge_phrase(body)
+            if edge:
+                source, edge_type, target = edge
                 import biokg
                 return biokg.pln_evidence_merge_pipe(f"{source}|{edge_type}|{target}")
 
@@ -110,6 +117,32 @@ def _source_aggregate_request(text: str):
     if m:
         target, neighbor = m.groups()
         return "schema-neighbor", [target.strip(), neighbor.strip()]
+
+    m = re.match(
+        r"^(?:does|do)\s+(?:biokg\s+)?(?:have|show)\s+evidence\s+that\s+(.+?)\s+(?:may\s+be|might\s+be|is|are)?\s*([A-Za-z][A-Za-z0-9_\-\s]*?)[-\s]?(?:regulated|associated|linked|connected)$",
+        q,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        target, neighbor = m.groups()
+        return "schema-neighbor", [target.strip(), neighbor.strip()]
+
+    m = re.match(
+        r"^(?:what|which)\s+evidence\s+sources?\s+support\s+(.+?)\s+([A-Za-z][A-Za-z0-9_\-\s]*?)\s+(?:association|evidence|support)$",
+        q,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        target, neighbor = m.groups()
+        return "schema-neighbor", [target.strip(), neighbor.strip()]
+
+    m = re.match(
+        r"^(?:do\s+we\s+have|is\s+there)\s+(?:regulatory|enhancer)\s+evidence\s+for\s+(.+)$",
+        q,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        return "schema-neighbor", [m.group(1).strip(), "enhancer"]
     return None
 
 
@@ -121,21 +154,65 @@ def _assistant_fast_path(query: str):
 
     patterns = (
         r"^what\s+does\s+(.+?)\s+do$",
+        r"^(?:can\s+you\s+)?summari[sz]e\s+what\s+(.+?)\s+is\s+known\s+to\s+do$",
+        r"^what\s+is\s+(.+?)\s+known\s+to\s+do$",
+        r"^(?:can\s+you\s+)?summari[sz]e\s+(.+?)$",
         r"^tell\s+me\s+about\s+(.+)$",
         r"^what\s+is\s+(.+)$",
         r"^show\s+me\s+(.+)$",
     )
     for pattern in patterns:
-        m = re.match(pattern, q_lower)
+        m = re.match(pattern, q_norm.rstrip("?.!"), flags=re.IGNORECASE)
         if not m:
             continue
-        # Preserve original capitalization where possible by slicing the
-        # normalized query with the same simple prefix/suffix structure.
-        entity = _extract_lookup_entity(q_norm, pattern, m.group(1))
+        entity = m.group(1).strip()
         if entity:
             import biokg
+            if "do$" in pattern or "known\\s+to\\s+do" in pattern or "summari" in pattern:
+                return biokg.functional_summary(entity)
             return biokg.lookup(entity)
     return None
+
+
+def _parse_edge_phrase(body: str):
+    body = re.sub(r"\b(?:claim|assertion|statement|fact)\b", " ", str(body), flags=re.IGNORECASE)
+    body = re.sub(r"\s+", " ", body).strip().rstrip("?.!")
+    patterns = (
+        r"^(.+?)\s+(enables?|enabled|enabling)\s+(.+)$",
+        r"^(.+?)\s+(associated_with|associated\s+with)\s+(.+)$",
+        r"^(.+?)\s+(involved_in|involved\s+in)\s+(.+)$",
+        r"^(.+?)\s+(located_in|located\s+in)\s+(.+)$",
+        r"^(.+?)\s+(participates_in|participates\s+in)\s+(.+)$",
+    )
+    for pattern in patterns:
+        m = re.match(pattern, body, flags=re.IGNORECASE)
+        if not m:
+            continue
+        source, edge, target = m.groups()
+        return source.strip(), _normalize_edge_type(edge), target.strip()
+    parts = body.split(maxsplit=2)
+    if len(parts) == 3 and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", parts[1]):
+        return parts[0], _normalize_edge_type(parts[1]), parts[2]
+    return None
+
+
+def _normalize_edge_type(edge: str) -> str:
+    key = re.sub(r"\s+", " ", str(edge).strip().lower())
+    aliases = {
+        "enable": "enables",
+        "enables": "enables",
+        "enabled": "enables",
+        "enabling": "enables",
+        "associated with": "associated_with",
+        "associated_with": "associated_with",
+        "involved in": "involved_in",
+        "involved_in": "involved_in",
+        "located in": "located_in",
+        "located_in": "located_in",
+        "participates in": "participates_in",
+        "participates_in": "participates_in",
+    }
+    return aliases.get(key, key.replace(" ", "_"))
 
 
 def _extract_lookup_entity(q_norm: str, pattern: str, lower_entity: str) -> str:

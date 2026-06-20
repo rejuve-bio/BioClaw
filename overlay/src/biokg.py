@@ -3036,6 +3036,61 @@ class MorkBackend:
             sources_info.append((_clean_label(label), ev, (f, c)))
 
         if not sources_info:
+            # MORK sometimes returns annotation atoms reliably in separate
+            # narrow transforms even when a multi-pattern source/evidence join
+            # yields no rows. Match provenance's targeted access path before
+            # concluding that annotations are absent.
+            def annotation_values(annotation: str) -> list[str]:
+                values = []
+                ann_tag = f"bioclaw_merge_{annotation}_{uuid.uuid4().hex[:8]}"
+                for ann_line in self._transform(
+                    patterns=[f"({annotation} {edge_atom} $val)"],
+                    template=f"({ann_tag} $val)",
+                ):
+                    ann_s = ann_line.strip()
+                    if not (ann_s.startswith("(") and ann_s.endswith(")")):
+                        continue
+                    ann_inner = ann_s[1:-1].strip()
+                    if not ann_inner.startswith(ann_tag):
+                        continue
+                    val = ann_inner[len(ann_tag):].strip()
+                    if val and val not in values:
+                        values.append(val)
+                return values
+
+            src_values = annotation_values("source")
+            ev_values = annotation_values("evidence")
+            if src_values or ev_values:
+                if src_values and ev_values:
+                    if len(src_values) == len(ev_values):
+                        pairs = list(zip(src_values, ev_values))
+                    elif len(src_values) == 1:
+                        pairs = [(src_values[0], ev) for ev in ev_values]
+                    elif len(ev_values) == 1:
+                        pairs = [(src, ev_values[0]) for src in src_values]
+                    else:
+                        pairs = [(src, ev) for src in src_values for ev in ev_values]
+                elif src_values:
+                    pairs = [(src, "") for src in src_values]
+                else:
+                    pairs = [("", ev) for ev in ev_values]
+
+                for src, ev in pairs:
+                    if (src, ev) in seen_pairs:
+                        continue
+                    seen_pairs.add((src, ev))
+                    f, c = _evidence_stv(ev, src, edge_confidence=None, edge_score=None)
+                    if src and ev:
+                        label = f"{src}/{ev}"
+                    elif src:
+                        label = src
+                    elif ev:
+                        label = ev
+                    else:
+                        label = "no-source"
+                    sources_info.append((_clean_label(label), ev, (f, c)))
+
+        if not sources_info:
             # Check whether the edge itself exists, to give a clearer error.
             edge_probe = self._query(edge_atom, "matched")
             if not any(h == "matched" for h in edge_probe):

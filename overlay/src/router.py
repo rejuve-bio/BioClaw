@@ -86,7 +86,18 @@ def route_specialist_message(role: str, msg: str) -> str:
             tool = f"biokg.lookup({entity})"
             return _specialist_send(role, tool, text, biokg.lookup(entity))
 
-        edge = _edge_question(text, prefixes=("who said ", "source of ", "evidence for "))
+        edge = _edge_question(
+            text,
+            prefixes=(
+                "who said ",
+                "source of ",
+                "evidence for ",
+                "where does ",
+                "where did ",
+                "what sources support ",
+                "which sources support ",
+            ),
+        )
         if edge:
             import biokg
             payload = "|".join(edge)
@@ -104,7 +115,17 @@ def route_specialist_message(role: str, msg: str) -> str:
             return _specialist_send(role, tool, text, result, interpret=False)
 
     if role == "reasoner":
-        edge = _edge_question(text, prefixes=("reconcile ", "merge evidence for "))
+        edge = _edge_question(
+            text,
+            prefixes=(
+                "reconcile ",
+                "merge evidence for ",
+                "how confident are we about ",
+                "confidence for ",
+                "confidence on ",
+                "how strong is the evidence for ",
+            ),
+        )
         if edge:
             import biokg
             payload = "|".join(edge)
@@ -131,6 +152,8 @@ def _conductor_specialist_for(text: str) -> str:
     reasoner_starts = (
         "reconcile ",
         "merge evidence for ",
+        "confidence for ",
+        "how confident ",
         "aggregate evidence ",
         "aggregate sources ",
         "source aggregate ",
@@ -142,6 +165,18 @@ def _conductor_specialist_for(text: str) -> str:
     )
     if q.startswith(reasoner_starts):
         return "reasoner"
+    if re.search(r"\b(?:confidence|confident|cross-source|cross method|consensus|aggregate)\b", q):
+        return "reasoner"
+    if re.search(r"\b(?:evidence|sources?|support)\b", q) and re.search(
+        r"\b(?:enhancer|regulat|disease|phenotype|associated|association)\b", q
+    ):
+        return "reasoner"
+    if re.search(r"\b(?:evidence|sources?|support|confidence|confident)\b", q) and re.search(
+        r"\b(?:that|this|it)\b", q
+    ):
+        return "reasoner"
+    if re.search(r"\b(?:where|source|provenance|citation|come from|comes from)\b", q):
+        return "assistant"
     if re.match(
         r"^(?:is|are)\s+.+?\s+.+?[-\s]?(?:regulated|associated|linked|connected)$",
         q,
@@ -181,21 +216,37 @@ def _lookup_entity(text: str) -> str:
 
 def _activity_summary_entity(text: str) -> str:
     q = re.sub(r"\s+", " ", text).strip().rstrip("?.!")
-    m = re.match(r"^what\s+does\s+(.+?)\s+do$", q, flags=re.IGNORECASE)
-    return m.group(1).strip() if m else ""
+    patterns = (
+        r"^what\s+does\s+(.+?)\s+do$",
+        r"^(?:can\s+you\s+)?summari[sz]e\s+what\s+(.+?)\s+is\s+known\s+to\s+do$",
+        r"^what\s+is\s+(.+?)\s+known\s+to\s+do$",
+        r"^(?:can\s+you\s+)?summari[sz]e\s+(.+?)$",
+    )
+    for pattern in patterns:
+        m = re.match(pattern, q, flags=re.IGNORECASE)
+        if m:
+            entity = m.group(1).strip()
+            if entity.lower() not in {"it", "that", "this"}:
+                return entity
+    return ""
 
 
 def _schema_neighbor_lookup_request(text: str):
     q = re.sub(r"\s+", " ", text).strip().rstrip("?.!")
     patterns = (
         (r"^what\s+molecular\s+functions?\s+does\s+(.+?)\s+enable$", "molecular function"),
+        (r"^(?:which|list|show)\s+molecular\s+functions?\s+(?:does\s+)?(.+?)\s+enable$", "molecular function"),
+        (r"^what\s+molecular\s+functions?\s+are\s+enabled\s+by\s+(.+)$", "molecular function"),
         (r"^what\s+functions?\s+does\s+(.+?)\s+enable$", "molecular function"),
         (r"^what\s+biological\s+process(?:es)?\s+is\s+(.+?)\s+involved\s+in$", "biological process"),
+        (r"^(?:which|list|show)\s+biological\s+process(?:es)?\s+is\s+(.+?)\s+involved\s+in$", "biological process"),
         (r"^is\s+(.+?)\s+involved\s+in\s+biological\s+process(?:es)?$", "biological process"),
         (r"^what\s+cellular\s+components?\s+is\s+(.+?)\s+located\s+in$", "cellular component"),
+        (r"^(?:which|list|show)\s+cellular\s+components?\s+is\s+(.+?)\s+located\s+in$", "cellular component"),
         (r"^is\s+(.+?)\s+located\s+in\s+cellular\s+component(?:s)?$", "cellular component"),
         (r"^what\s+pathways?\s+does\s+(.+?)\s+participate\s+in$", "pathway"),
         (r"^what\s+diseases?\s+is\s+(.+?)\s+associated\s+with$", "disease"),
+        (r"^(?:which|list|show)\s+diseases?\s+is\s+(.+?)\s+associated\s+with$", "disease"),
     )
     for pattern, neighbor in patterns:
         m = re.match(pattern, q, flags=re.IGNORECASE)
@@ -210,11 +261,78 @@ def _edge_question(text: str, prefixes: tuple):
     for prefix in prefixes:
         if not lower.startswith(prefix):
             continue
+        if prefix in {"where does ", "where did "}:
+            continue
         body = q[len(prefix):].strip()
-        parts = body.split(maxsplit=2)
-        if len(parts) == 3:
-            return parts[0], parts[1], parts[2]
+        parsed = _parse_edge_phrase(body)
+        if parsed:
+            return parsed
+
+    provenance_patterns = (
+        r"^(?:where\s+does|where\s+did)\s+(?:the\s+)?(.+?)\s+(?:claim|assertion|statement|fact)\s+come\s+from$",
+        r"^(?:what|which)\s+sources?\s+support\s+(.+)$",
+    )
+    if any(prefix in {"where does ", "where did ", "what sources support ", "which sources support "} for prefix in prefixes):
+        for pattern in provenance_patterns:
+            m = re.match(pattern, q, flags=re.IGNORECASE)
+            if m:
+                parsed = _parse_edge_phrase(m.group(1).strip())
+                if parsed:
+                    return parsed
+
+    confidence_patterns = (
+        r"^(?:how\s+confident\s+are\s+we\s+about|confidence\s+for|confidence\s+on)\s+(.+)$",
+        r"^(?:how\s+strong\s+is\s+the\s+evidence\s+for)\s+(.+)$",
+    )
+    if any("confident" in prefix or "confidence" in prefix for prefix in prefixes):
+        for pattern in confidence_patterns:
+            m = re.match(pattern, q, flags=re.IGNORECASE)
+            if m:
+                parsed = _parse_edge_phrase(m.group(1).strip())
+                if parsed:
+                    return parsed
     return None
+
+
+def _parse_edge_phrase(body: str):
+    body = re.sub(r"\b(?:claim|assertion|statement|fact)\b", " ", str(body), flags=re.IGNORECASE)
+    body = re.sub(r"\s+", " ", body).strip().rstrip("?.!")
+    patterns = (
+        r"^(.+?)\s+(enables?|enabled|enabling)\s+(.+)$",
+        r"^(.+?)\s+(associated_with|associated\s+with)\s+(.+)$",
+        r"^(.+?)\s+(involved_in|involved\s+in)\s+(.+)$",
+        r"^(.+?)\s+(located_in|located\s+in)\s+(.+)$",
+        r"^(.+?)\s+(participates_in|participates\s+in)\s+(.+)$",
+    )
+    for pattern in patterns:
+        m = re.match(pattern, body, flags=re.IGNORECASE)
+        if not m:
+            continue
+        source, edge, target = m.groups()
+        return source.strip(), _normalize_edge_type(edge), target.strip()
+    parts = body.split(maxsplit=2)
+    if len(parts) == 3 and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", parts[1]):
+        return parts[0], _normalize_edge_type(parts[1]), parts[2]
+    return None
+
+
+def _normalize_edge_type(edge: str) -> str:
+    key = re.sub(r"\s+", " ", str(edge).strip().lower())
+    aliases = {
+        "enable": "enables",
+        "enables": "enables",
+        "enabled": "enables",
+        "enabling": "enables",
+        "associated with": "associated_with",
+        "associated_with": "associated_with",
+        "involved in": "involved_in",
+        "involved_in": "involved_in",
+        "located in": "located_in",
+        "located_in": "located_in",
+        "participates in": "participates_in",
+        "participates_in": "participates_in",
+    }
+    return aliases.get(key, key.replace(" ", "_"))
 
 
 def _source_aggregate_request(text: str):
@@ -254,6 +372,32 @@ def _source_aggregate_request(text: str):
     if m:
         target, neighbor = m.groups()
         return "schema-neighbor", [target.strip(), neighbor.strip()]
+
+    m = re.match(
+        r"^(?:does|do)\s+(?:biokg\s+)?(?:have|show)\s+evidence\s+that\s+(.+?)\s+(?:may\s+be|might\s+be|is|are)?\s*([A-Za-z][A-Za-z0-9_\-\s]*?)[-\s]?(?:regulated|associated|linked|connected)$",
+        q,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        target, neighbor = m.groups()
+        return "schema-neighbor", [target.strip(), neighbor.strip()]
+
+    m = re.match(
+        r"^(?:what|which)\s+evidence\s+sources?\s+support\s+(.+?)\s+([A-Za-z][A-Za-z0-9_\-\s]*?)\s+(?:association|evidence|support)$",
+        q,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        target, neighbor = m.groups()
+        return "schema-neighbor", [target.strip(), neighbor.strip()]
+
+    m = re.match(
+        r"^(?:do\s+we\s+have|is\s+there)\s+(?:regulatory|enhancer)\s+evidence\s+for\s+(.+)$",
+        q,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        return "schema-neighbor", [m.group(1).strip(), "enhancer"]
     return None
 
 

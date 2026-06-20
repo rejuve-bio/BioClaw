@@ -12,13 +12,21 @@ from datetime import datetime, timezone
 
 _STYLE_ENV = "BIOCLAW_ANSWER_STYLE"
 _DEFAULT_TRACE = "/PeTTa/repos/OmegaClaw-Core/memory/bioclaw_case_memory.jsonl"
+_LLM_PROVIDER_ENV = "BIOCLAW_INTERPRETER_PROVIDER"
+_LLM_MAX_TOKENS_ENV = "BIOCLAW_INTERPRETER_MAX_TOKENS"
 
 
 def interpret_and_record(role: str, tool_call: str, user_text: str, raw_result: str) -> str:
     """Return the user-facing answer and append workflow trace metadata."""
     raw = _single_line(raw_result)
     style = os.environ.get(_STYLE_ENV, "interpreted").strip().lower()
-    final = raw if style == "raw" else interpret(role, tool_call, user_text, raw)
+    if style == "raw":
+        final = raw
+    elif style in {"llm", "natural", "polished"}:
+        deterministic = interpret(role, tool_call, user_text, raw)
+        final = _llm_rewrite_grounded(role, tool_call, user_text, raw, deterministic)
+    else:
+        final = interpret(role, tool_call, user_text, raw)
     _record_case(role, tool_call, user_text, raw, final)
     return final
 
@@ -111,6 +119,105 @@ def _caveats_for(lower_context: str, raw: str) -> list:
     if "enhancer" in lower_context and "associated_with" in lower_context and not aggregate_tool:
         caveats.append("Enhancer associations are evidence for possible regulation, not proof of direct regulatory mechanism.")
     return _dedupe(caveats)
+
+
+def _llm_rewrite_grounded(role: str, tool_call: str, user_text: str, raw: str, deterministic: str) -> str:
+    """Use the configured LLM only as a grounded answer formatter.
+
+    The LLM receives the raw tool result and deterministic interpretation, not
+    permission to add external biology. If anything goes wrong, BioClaw falls
+    back to the deterministic answer.
+    """
+    if not raw or raw.startswith("error:") or raw.startswith("biokg unavailable"):
+        return raw
+    provider = (
+        os.environ.get(_LLM_PROVIDER_ENV)
+        or os.environ.get("LLM_PROVIDER")
+        or os.environ.get("provider")
+        or "OpenRouter"
+    ).strip()
+    try:
+        max_tokens = int(os.environ.get(_LLM_MAX_TOKENS_ENV, "450"))
+    except (TypeError, ValueError):
+        max_tokens = 450
+
+    prompt = _grounded_rewrite_prompt(role, tool_call, user_text, raw, deterministic)
+    try:
+        import lib_llm_ext
+        answer = lib_llm_ext.callProvider(provider, prompt, max_tokens=max_tokens, reasoning="low")
+    except Exception as exc:
+        if os.environ.get("BIOCLAW_INTERPRETER_LOG_ERRORS", "false").strip().lower() in {"1", "true", "yes", "on"}:
+            print(f"[BIOCLAW_INTERPRETER] LLM rewrite failed: {exc}", flush=True)
+        return deterministic
+
+    answer = _strip_llm_answer(answer)
+    if not answer:
+        return deterministic
+    if _looks_ungrounded(answer):
+        return deterministic
+    return _preserve_critical_tokens(answer, raw)
+
+
+def _grounded_rewrite_prompt(role: str, tool_call: str, user_text: str, raw: str, deterministic: str) -> str:
+    return f"""You are BioClaw's answer formatter, not a biology oracle.
+
+Rewrite the grounded tool result into a concise, natural answer for a biologist.
+
+Rules:
+- Use ONLY the facts in RAW_TOOL_RESULT and DETERMINISTIC_ANSWER.
+- Do not add external biology, mechanisms, literature, citations, or assumptions.
+- Preserve exact source names, edge counts, evidence codes, and all stv values.
+- Preserve caveats: enhancer association is not causal proof; IEA is electronically inferred; single-source means no cross-source merge.
+- If the result says no support was found, say this KG snapshot did not return support, not that biology disproves it.
+- Return only the final answer, with no bullets unless bullets make it clearer.
+- Keep it short enough for IRC, ideally 2-4 sentences.
+
+ROLE: {role}
+USER_QUESTION: {user_text}
+TOOL_CALL: {tool_call}
+RAW_TOOL_RESULT: {raw}
+DETERMINISTIC_ANSWER: {deterministic}
+"""
+
+
+def _strip_llm_answer(text: str) -> str:
+    answer = _single_line(text)
+    answer = re.sub(r"^```(?:text|markdown)?\s*", "", answer, flags=re.IGNORECASE)
+    answer = re.sub(r"\s*```$", "", answer)
+    answer = re.sub(r"^(?:send|answer)\s*:\s*", "", answer, flags=re.IGNORECASE)
+    if len(answer) > 900:
+        answer = answer[:900].rsplit(" ", 1)[0].rstrip() + " ..."
+    return answer.strip()
+
+
+def _looks_ungrounded(answer: str) -> bool:
+    lower = answer.lower()
+    banned = (
+        "according to my knowledge",
+        "in the literature",
+        "it is well known",
+        "generally known",
+        "as an ai",
+    )
+    return any(phrase in lower for phrase in banned)
+
+
+def _preserve_critical_tokens(answer: str, raw: str) -> str:
+    missing = []
+    for token in _critical_tokens(raw):
+        if token not in answer:
+            missing.append(token)
+    if not missing:
+        return answer
+    return _append_once(answer, "Grounded details:", "Grounded details: " + "; ".join(missing))
+
+
+def _critical_tokens(raw: str) -> list:
+    tokens = []
+    tokens.extend(re.findall(r"stv\s+[0-9.]+/[0-9.]+", raw, flags=re.IGNORECASE))
+    for token in re.findall(r"\b(?:GOA|IEA|IDA|IPI|IMP|IGI|ISA|PEREGRINE|Enhancer Atlas|Human Phenotype Ontology)\b", raw):
+        tokens.append(token)
+    return _dedupe(tokens)
 
 
 def _record_case(role: str, tool_call: str, user_text: str, raw: str, final: str) -> None:
