@@ -7,10 +7,11 @@
 # Reset:       docker compose down -v         (also wipes memory)
 #
 # Required env (read from .env file, written by scripts/bioclaw-up):
-#   ANTHROPIC_API_KEY / OPENAI_API_KEY / ASI_API_KEY / ASIONE_API_KEY
+#   ANTHROPIC_API_KEY / OPENAI_API_KEY / ASI_API_KEY / ASIONE_API_KEY /
+#   OPENROUTER_API_KEY
 #       — only the one matching LLM_PROVIDER needs to be set; the rest
 #         default to empty and are ignored.
-#   LLM_PROVIDER     ASIOne | Anthropic | OpenAI | ASICloud
+#   LLM_PROVIDER     ASIOne | Anthropic | OpenAI | ASICloud | OpenRouter
 #   EMBED_PROVIDER   Local | OpenAI
 #   TG_BOT_TOKEN     conductor's telegram bot token
 #   AUTH_SECRET      conductor's auth secret
@@ -21,6 +22,7 @@ x-common-env: &common-env
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
   ASI_API_KEY: ${ASI_API_KEY:-}
   ASIONE_API_KEY: ${ASIONE_API_KEY:-}
+  OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
   # BioKG backend selection. Defaults to disabled until URI/password are set.
   BIOKG_BACKEND: ${BIOKG_BACKEND:-disabled}
   NEO4J_URI: ${NEO4J_URI:-}

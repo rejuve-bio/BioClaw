@@ -54,15 +54,17 @@ Select LLM provider:
   2) OpenAI
   3) ASI Cloud (Minimax)
   4) ASI:One
+  5) OpenRouter (GLM-5.1 only)
 EOF
   while true; do
-    read -r -p "Enter 1-4 (default: 1): " c
-    case "${c:-1}" in
+    read -r -p "Enter 1-5 (default: 5): " c
+    case "${c:-5}" in
       1) LLM_PROVIDER="Anthropic"; EMBED_PROVIDER="Local"; API_TOKEN_VAR="ANTHROPIC_API_KEY"; return ;;
       2) LLM_PROVIDER="OpenAI";    EMBED_PROVIDER="OpenAI"; API_TOKEN_VAR="OPENAI_API_KEY";    return ;;
       3) LLM_PROVIDER="ASICloud";  EMBED_PROVIDER="Local"; API_TOKEN_VAR="ASI_API_KEY";        return ;;
       4) LLM_PROVIDER="ASIOne";    EMBED_PROVIDER="Local"; API_TOKEN_VAR="ASIONE_API_KEY";     return ;;
-      *) echo "Please enter 1-4." >&2 ;;
+      5) LLM_PROVIDER="OpenRouter"; EMBED_PROVIDER="Local"; API_TOKEN_VAR="OPENROUTER_API_KEY"; return ;;
+      *) echo "Please enter 1-5." >&2 ;;
     esac
   done
 }
