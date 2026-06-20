@@ -168,9 +168,9 @@ class AsiOneProvider(AIProvider):
 class OpenRouterProvider(AIProvider):
     """OpenRouter provider pinned to a specific model.
 
-    BioClaw uses OpenRouter mainly for grounded answer formatting. Ask
-    OpenRouter not to include reasoning tokens in the response so
-    message.content is more likely to contain the final answer.
+    BioClaw uses OpenRouter mainly for grounded answer formatting. Disable
+    reasoning for this provider path; otherwise GLM can spend the whole small
+    formatter budget on hidden reasoning and return no visible answer.
     """
 
     def chat(self, content: str, max_tokens: int = 6000, reasoning: str = "medium", **kwargs) -> str:
@@ -181,7 +181,7 @@ class OpenRouterProvider(AIProvider):
 
         content = content.replace(":-:-:-:", " ")
         extra_body = kwargs.pop("extra_body", {}) or {}
-        extra_body.setdefault("reasoning", {"exclude": True})
+        extra_body.setdefault("reasoning", {"effort": "none", "exclude": True})
         kwargs.setdefault("temperature", 0.2)
         try:
             response = self._client.chat.completions.create(
@@ -307,5 +307,4 @@ def useLocalEmbedding(atom):
         atom,
         normalize_embeddings=True
     ).tolist()
-
 
