@@ -159,27 +159,23 @@ def _llm_rewrite_grounded(role: str, tool_call: str, user_text: str, raw: str, d
 
 
 def _grounded_rewrite_prompt(role: str, tool_call: str, user_text: str, raw: str, deterministic: str) -> str:
-    return f"""You are BioClaw's answer formatter, not a biology oracle.
+    system = """You are BioClaw's answer formatter, not a biology oracle.
+Your job is to make grounded BioKG/PLN tool output readable for biologists.
+Use only the supplied grounded facts. Do not add outside biology, mechanisms, literature, citations, or assumptions.
+Preserve source names, edge counts, evidence codes, stv values, and caveats.
+If no support was found, say this KG snapshot did not return support; do not imply biology disproves it.
+Return normal English prose only. Do not return MeTTa, Lisp, JSON, XML, tool calls, bullets by default, or placeholders like (), nil, null, or N/A.
+Keep the answer short enough for IRC, ideally 2-4 sentences."""
+    user = f"""Rewrite this grounded result.
 
-Rewrite the grounded tool result into a concise, natural answer for a biologist.
+Role: {role}
+User question: {user_text}
+Tool call: {tool_call}
+Raw tool result: {raw}
+Deterministic answer: {deterministic}
 
-Rules:
-- Use ONLY the facts in RAW_TOOL_RESULT and DETERMINISTIC_ANSWER.
-- Do not add external biology, mechanisms, literature, citations, or assumptions.
-- Preserve exact source names, edge counts, evidence codes, and all stv values.
-- Preserve caveats: enhancer association is not causal proof; IEA is electronically inferred; single-source means no cross-source merge.
-- If the result says no support was found, say this KG snapshot did not return support, not that biology disproves it.
-- Return only the final answer, with no bullets unless bullets make it clearer.
-- Return normal English prose, not MeTTa, Lisp, JSON, XML, or tool-call syntax.
-- Never return an empty placeholder such as (), nil, null, or N/A.
-- Keep it short enough for IRC, ideally 2-4 sentences.
-
-ROLE: {role}
-USER_QUESTION: {user_text}
-TOOL_CALL: {tool_call}
-RAW_TOOL_RESULT: {raw}
-DETERMINISTIC_ANSWER: {deterministic}
-"""
+Final answer:"""
+    return system + ":-:-:-:" + user
 
 
 def _strip_llm_answer(text: str) -> str:

@@ -179,14 +179,18 @@ class OpenRouterProvider(AIProvider):
         if self._client is None:
             raise RuntimeError(f"{self.name} not configured (set {self._var_name})")
 
-        content = content.replace(":-:-:-:", " ")
+        if ":-:-:-:" in content:
+            sysmsg, usermsg = content.split(":-:-:-:", 1)
+            messages = [{"role": "system", "content": sysmsg}, {"role": "user", "content": usermsg}]
+        else:
+            messages = [{"role": "user", "content": content}]
         extra_body = kwargs.pop("extra_body", {}) or {}
         extra_body.setdefault("reasoning", {"effort": "none", "exclude": True})
-        kwargs.setdefault("temperature", 0.2)
+        kwargs.setdefault("temperature", 0)
         try:
             response = self._client.chat.completions.create(
                 model=self._model_name,
-                messages=[{"role": "user", "content": content}],
+                messages=messages,
                 max_tokens=max_tokens,
                 extra_body=extra_body,
                 **kwargs,
@@ -307,4 +311,3 @@ def useLocalEmbedding(atom):
         atom,
         normalize_embeddings=True
     ).tolist()
-
