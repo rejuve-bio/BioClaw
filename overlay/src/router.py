@@ -71,6 +71,20 @@ def route_specialist_message(role: str, msg: str) -> str:
         return ""
 
     if role == "assistant":
+        staged = _stage_request(text)
+        if staged:
+            import biokg
+            result = biokg.stage_pipe("|".join(staged))
+            sid = _staging_id(result)
+            if sid:
+                result += f" To approve, reply: approve {sid}. To reject, reply: reject {sid}."
+            tool = f"biokg.stage_pipe({'|'.join(staged)})"
+            return _specialist_send(role, tool, text, result, interpret=False)
+
+        llm_routed = _execute_llm_specialist_intent(role, text)
+        if llm_routed:
+            return llm_routed
+
         entity = _activity_summary_entity(text)
         if entity:
             import biokg
@@ -90,10 +104,6 @@ def route_specialist_message(role: str, msg: str) -> str:
             tool = f"biokg.lookup({entity})"
             return _specialist_send(role, tool, text, biokg.lookup(entity))
 
-        llm_routed = _execute_llm_specialist_intent(role, text)
-        if llm_routed:
-            return llm_routed
-
         edge = _edge_question(
             text,
             prefixes=(
@@ -111,16 +121,6 @@ def route_specialist_message(role: str, msg: str) -> str:
             payload = "|".join(edge)
             tool = f"biokg.provenance({payload})"
             return _specialist_send(role, tool, text, biokg.provenance(payload))
-
-        staged = _stage_request(text)
-        if staged:
-            import biokg
-            result = biokg.stage_pipe("|".join(staged))
-            sid = _staging_id(result)
-            if sid:
-                result += f" To approve, reply: approve {sid}. To reject, reply: reject {sid}."
-            tool = f"biokg.stage_pipe({'|'.join(staged)})"
-            return _specialist_send(role, tool, text, result, interpret=False)
 
     if role == "reasoner":
         llm_routed = _execute_llm_specialist_intent(role, text)
@@ -163,6 +163,22 @@ def _execute_llm_specialist_intent(role: str, text: str) -> str:
     intent = _llm_specialist_intent(role, text)
     if not intent:
         return ""
+    executed = _run_specialist_intent(role, text, intent)
+    if not executed:
+        return ""
+    call, raw, interpret = executed
+    if _should_repair_tool_result(raw):
+        repaired = _llm_specialist_intent(role, text, previous_intent=intent, previous_result=raw)
+        if repaired:
+            repaired_executed = _run_specialist_intent(role, text, repaired)
+            if repaired_executed and not _same_intent(intent, repaired):
+                r_call, r_raw, r_interpret = repaired_executed
+                if not _should_prefer_original_result(raw, r_raw):
+                    call, raw, interpret = r_call, r_raw, r_interpret
+    return _specialist_send(role, call, text, raw, interpret=interpret)
+
+
+def _run_specialist_intent(role: str, text: str, intent: dict):
     tool = intent.get("tool", "")
     try:
         import biokg
@@ -171,25 +187,25 @@ def _execute_llm_specialist_intent(role: str, text: str) -> str:
                 entity = _normalize_entity_phrase(intent.get("entity", ""))
                 if entity:
                     call = f"biokg.functional_summary({entity})"
-                    return _specialist_send(role, call, text, biokg.functional_summary(entity))
+                    return call, biokg.functional_summary(entity), True
             if tool == "schema_neighbor_lookup":
                 entity = _normalize_entity_phrase(intent.get("entity", ""))
                 neighbor = _normalize_neighbor_label(intent.get("neighbor", ""))
                 if entity and neighbor:
                     payload = "|".join([entity, neighbor])
                     call = f"biokg.schema_neighbor_lookup_pipe({payload})"
-                    return _specialist_send(role, call, text, biokg.schema_neighbor_lookup_pipe(payload))
+                    return call, biokg.schema_neighbor_lookup_pipe(payload), True
             if tool == "lookup":
                 entity = _normalize_entity_phrase(intent.get("entity", ""))
                 if entity:
                     call = f"biokg.lookup({entity})"
-                    return _specialist_send(role, call, text, biokg.lookup(entity))
+                    return call, biokg.lookup(entity), True
             if tool == "provenance":
                 source, edge, target = _intent_edge_values(intent)
                 if source and edge and target:
                     payload = "|".join([source, edge, target])
                     call = f"biokg.provenance({payload})"
-                    return _specialist_send(role, call, text, biokg.provenance(payload))
+                    return call, biokg.provenance(payload), True
             if tool == "stage":
                 source, edge, target = _intent_edge_values(intent)
                 evidence = str(intent.get("evidence") or "proposed by biocurator").strip()
@@ -199,21 +215,21 @@ def _execute_llm_specialist_intent(role: str, text: str) -> str:
                     if sid:
                         result += f" To approve, reply: approve {sid}. To reject, reply: reject {sid}."
                     call = f"biokg.stage_pipe({'|'.join([source, edge, target, evidence])})"
-                    return _specialist_send(role, call, text, result, interpret=False)
+                    return call, result, False
         if role == "reasoner":
             if tool == "evidence_merge":
                 source, edge, target = _intent_edge_values(intent)
                 if source and edge and target:
                     payload = "|".join([source, edge, target])
                     call = f"biokg.pln_evidence_merge_pipe({payload})"
-                    return _specialist_send(role, call, text, biokg.pln_evidence_merge_pipe(payload))
+                    return call, biokg.pln_evidence_merge_pipe(payload), True
             if tool == "schema_neighbor_aggregate":
                 entity = _normalize_entity_phrase(intent.get("entity", ""))
                 neighbor = _normalize_neighbor_label(intent.get("neighbor", ""))
                 if entity and neighbor:
                     payload = "|".join([entity, neighbor])
                     call = f"biokg.pln_schema_neighbor_aggregate_pipe({payload})"
-                    return _specialist_send(role, call, text, biokg.pln_schema_neighbor_aggregate_pipe(payload))
+                    return call, biokg.pln_schema_neighbor_aggregate_pipe(payload), True
             if tool == "source_aggregate":
                 entity = _normalize_entity_phrase(intent.get("entity", ""))
                 edge = _normalize_edge_type(intent.get("edge", ""))
@@ -224,10 +240,10 @@ def _execute_llm_specialist_intent(role: str, text: str) -> str:
                         values.append(neighbor)
                     payload = "|".join(values)
                     call = f"biokg.pln_source_aggregate_pipe({payload})"
-                    return _specialist_send(role, call, text, biokg.pln_source_aggregate_pipe(payload))
+                    return call, biokg.pln_source_aggregate_pipe(payload), True
     except Exception as exc:
         print(f"[BIOCLAW_ROUTER] LLM intent execution failed: {exc}", flush=True)
-    return ""
+    return None
 
 
 def _conductor_specialist_for(text: str) -> str:
@@ -285,7 +301,9 @@ Do not answer the biology question."""
     return ""
 
 
-def _llm_specialist_intent(role: str, text: str) -> dict:
+def _llm_specialist_intent(role: str, text: str,
+                           previous_intent: dict = None,
+                           previous_result: str = "") -> dict:
     if not _llm_routing_enabled():
         return {}
     if role == "assistant":
@@ -320,7 +338,16 @@ If no allowed tool fits, return {{"tool":"none"}}.
 SCHEMA:
 {_schema_prompt_inventory()}
 {tools}"""
-    user = f"User message: {text}"
+    if previous_intent is not None:
+        user = (
+            f"User message: {text}\n"
+            f"Previous tool JSON failed: {json.dumps(previous_intent, sort_keys=True)}\n"
+            f"Grounded BioKG/PLN result from that tool: {previous_result}\n"
+            "Return a corrected tool JSON if a different supported tool or corrected field values would better answer the user. "
+            "If the grounded result is a true absence rather than a routing/parsing error, return {\"tool\":\"none\"}."
+        )
+    else:
+        user = f"User message: {text}"
     data = _llm_json(system, user, max_tokens=180)
     if not isinstance(data, dict):
         return {}
@@ -333,6 +360,41 @@ SCHEMA:
         return {}
     data["tool"] = tool
     return data
+
+
+def _should_repair_tool_result(raw: str) -> bool:
+    lower = str(raw or "").lower()
+    if lower.startswith("error:"):
+        return True
+    repair_markers = (
+        "target entity",
+        "source entity",
+        "not found in biokg",
+        "edge type",
+        "no connections in biokg",
+        "no connections currently recorded",
+        "did not return support",
+        "i did not find biokg edge",
+        "i did not find any biokg",
+    )
+    return any(marker in lower for marker in repair_markers)
+
+
+def _should_prefer_original_result(original: str, repaired: str) -> bool:
+    if not repaired:
+        return True
+    if not _should_repair_tool_result(original):
+        return True
+    if _should_repair_tool_result(repaired) and len(repaired) <= len(original):
+        return True
+    return False
+
+
+def _same_intent(a: dict, b: dict) -> bool:
+    comparable = ("tool", "entity", "neighbor", "source", "edge", "target")
+    return {k: str((a or {}).get(k, "")).strip().lower() for k in comparable} == {
+        k: str((b or {}).get(k, "")).strip().lower() for k in comparable
+    }
 
 
 def _llm_routing_enabled() -> bool:
