@@ -6,6 +6,7 @@ calls inside their own containers.
 """
 import os
 import re
+import json
 
 
 def route_direct(msgnew, msg, lastresults="") -> str:
@@ -58,7 +59,10 @@ def route_human_message(msg: str) -> str:
         import biokg
         return _send(biog_single_line(biokg.list_staging()))
 
-    return _delegate(_conductor_specialist_for(text), text)
+    role = _conductor_specialist_for(text)
+    if role == "assistant" and not _conductor_assistant_route_is_confident(text):
+        role = _llm_conductor_specialist_for(text) or role
+    return _delegate(role, text)
 
 
 def route_specialist_message(role: str, msg: str) -> str:
@@ -114,6 +118,10 @@ def route_specialist_message(role: str, msg: str) -> str:
             tool = f"biokg.stage_pipe({'|'.join(staged)})"
             return _specialist_send(role, tool, text, result, interpret=False)
 
+        llm_routed = _execute_llm_specialist_intent(role, text)
+        if llm_routed:
+            return llm_routed
+
     if role == "reasoner":
         edge = _edge_question(
             text,
@@ -143,6 +151,81 @@ def route_specialist_message(role: str, msg: str) -> str:
             tool = f"biokg.pln_source_aggregate_pipe({payload})"
             return _specialist_send(role, tool, text, biokg.pln_source_aggregate_pipe(payload))
 
+        llm_routed = _execute_llm_specialist_intent(role, text)
+        if llm_routed:
+            return llm_routed
+
+    return ""
+
+
+def _execute_llm_specialist_intent(role: str, text: str) -> str:
+    intent = _llm_specialist_intent(role, text)
+    if not intent:
+        return ""
+    tool = intent.get("tool", "")
+    try:
+        import biokg
+        if role == "assistant":
+            if tool == "functional_summary":
+                entity = _normalize_entity_phrase(intent.get("entity", ""))
+                if entity:
+                    call = f"biokg.functional_summary({entity})"
+                    return _specialist_send(role, call, text, biokg.functional_summary(entity))
+            if tool == "schema_neighbor_lookup":
+                entity = _normalize_entity_phrase(intent.get("entity", ""))
+                neighbor = _normalize_neighbor_label(intent.get("neighbor", ""))
+                if entity and neighbor:
+                    payload = "|".join([entity, neighbor])
+                    call = f"biokg.schema_neighbor_lookup_pipe({payload})"
+                    return _specialist_send(role, call, text, biokg.schema_neighbor_lookup_pipe(payload))
+            if tool == "lookup":
+                entity = _normalize_entity_phrase(intent.get("entity", ""))
+                if entity:
+                    call = f"biokg.lookup({entity})"
+                    return _specialist_send(role, call, text, biokg.lookup(entity))
+            if tool == "provenance":
+                source, edge, target = _intent_edge_values(intent)
+                if source and edge and target:
+                    payload = "|".join([source, edge, target])
+                    call = f"biokg.provenance({payload})"
+                    return _specialist_send(role, call, text, biokg.provenance(payload))
+            if tool == "stage":
+                source, edge, target = _intent_edge_values(intent)
+                evidence = str(intent.get("evidence") or "proposed by biocurator").strip()
+                if source and edge and target:
+                    result = biokg.stage_pipe("|".join([source, edge, target, evidence]))
+                    sid = _staging_id(result)
+                    if sid:
+                        result += f" To approve, reply: approve {sid}. To reject, reply: reject {sid}."
+                    call = f"biokg.stage_pipe({'|'.join([source, edge, target, evidence])})"
+                    return _specialist_send(role, call, text, result, interpret=False)
+        if role == "reasoner":
+            if tool == "evidence_merge":
+                source, edge, target = _intent_edge_values(intent)
+                if source and edge and target:
+                    payload = "|".join([source, edge, target])
+                    call = f"biokg.pln_evidence_merge_pipe({payload})"
+                    return _specialist_send(role, call, text, biokg.pln_evidence_merge_pipe(payload))
+            if tool == "schema_neighbor_aggregate":
+                entity = _normalize_entity_phrase(intent.get("entity", ""))
+                neighbor = _normalize_neighbor_label(intent.get("neighbor", ""))
+                if entity and neighbor:
+                    payload = "|".join([entity, neighbor])
+                    call = f"biokg.pln_schema_neighbor_aggregate_pipe({payload})"
+                    return _specialist_send(role, call, text, biokg.pln_schema_neighbor_aggregate_pipe(payload))
+            if tool == "source_aggregate":
+                entity = _normalize_entity_phrase(intent.get("entity", ""))
+                edge = _normalize_edge_type(intent.get("edge", ""))
+                neighbor = _normalize_neighbor_label(intent.get("neighbor", ""))
+                if entity and edge:
+                    values = [entity, edge]
+                    if neighbor:
+                        values.append(neighbor)
+                    payload = "|".join(values)
+                    call = f"biokg.pln_source_aggregate_pipe({payload})"
+                    return _specialist_send(role, call, text, biokg.pln_source_aggregate_pipe(payload))
+    except Exception as exc:
+        print(f"[BIOCLAW_ROUTER] LLM intent execution failed: {exc}", flush=True)
     return ""
 
 
@@ -184,6 +267,113 @@ def _conductor_specialist_for(text: str) -> str:
     ):
         return "reasoner"
     return "assistant"
+
+
+def _conductor_assistant_route_is_confident(text: str) -> bool:
+    q = re.sub(r"\s+", " ", text).strip().lower().rstrip("?.!")
+    return bool(
+        re.search(r"\b(?:where|source|provenance|citation|come from|comes from)\b", q)
+        or q.startswith(("propose ", "propose adding edge", "stage "))
+        or re.match(r"^(?:what\s+does|tell\s+me\s+about|what\s+is|show\s+me|summari[sz]e|can\s+you\s+summari[sz]e)\b", q)
+        or re.search(r"\b(?:molecular function|biological process|cellular component|pathway)\b", q)
+    )
+
+
+def _llm_conductor_specialist_for(text: str) -> str:
+    if not _llm_routing_enabled():
+        return ""
+    system = """You route BioClaw user messages to one specialist.
+Return only JSON: {"specialist":"assistant"} or {"specialist":"reasoner"}.
+AssistantOC handles entity summaries, direct annotations, BioKG lookup, provenance/source questions for a specific edge, and staging/proposals.
+ReasonerOC handles evidence confidence, reconcile/merge, source aggregation, disease/enhancer/regulation association evidence, and hypothesis-style reasoning.
+Do not answer the biology question."""
+    user = f"User message: {text}"
+    data = _llm_json(system, user, max_tokens=80)
+    role = str(data.get("specialist", "")).strip().lower() if isinstance(data, dict) else ""
+    if role in {"assistant", "reasoner"}:
+        return role
+    return ""
+
+
+def _llm_specialist_intent(role: str, text: str) -> dict:
+    if not _llm_routing_enabled():
+        return {}
+    if role == "assistant":
+        tools = (
+            "Allowed tools:\n"
+            "- functional_summary: broad question about what an entity/gene is known to do. Fields: entity.\n"
+            "- schema_neighbor_lookup: direct annotations for a neighbor class. Fields: entity, neighbor.\n"
+            "- lookup: general entity lookup. Fields: entity.\n"
+            "- provenance: source/provenance for a specific edge. Fields: source, edge, target.\n"
+            "- stage: user proposes adding an edge. Fields: source, edge, target, evidence.\n"
+        )
+    elif role == "reasoner":
+        tools = (
+            "Allowed tools:\n"
+            "- evidence_merge: confidence/reconcile/merge evidence for a specific edge. Fields: source, edge, target.\n"
+            "- schema_neighbor_aggregate: aggregate evidence for an entity through a biological neighbor class such as enhancer, disease, molecular function, biological process, cellular component, pathway. Fields: entity, neighbor.\n"
+            "- source_aggregate: aggregate evidence by explicit edge type, optionally through a neighbor class. Fields: entity, edge, optional neighbor.\n"
+        )
+    else:
+        return {}
+    system = f"""You are the {role} BioClaw intent parser.
+Translate messy natural-language biology questions into exactly one supported tool call.
+Return only compact JSON. Do not answer the question.
+Use entity symbols as written, but remove type words like "gene" before the symbol.
+Normalize edges to one of: enables, associated_with, involved_in, located_in, participates_in, transcribes_to, translates_to, is_implicated_in.
+Normalize neighbors to one of: enhancer, disease, molecular function, biological process, cellular component, pathway, transcript, protein.
+If no allowed tool fits, return {{"tool":"none"}}.
+{tools}"""
+    user = f"User message: {text}"
+    data = _llm_json(system, user, max_tokens=180)
+    if not isinstance(data, dict):
+        return {}
+    tool = str(data.get("tool", "")).strip()
+    allowed = {
+        "assistant": {"functional_summary", "schema_neighbor_lookup", "lookup", "provenance", "stage", "none"},
+        "reasoner": {"evidence_merge", "schema_neighbor_aggregate", "source_aggregate", "none"},
+    }[role]
+    if tool not in allowed or tool == "none":
+        return {}
+    data["tool"] = tool
+    return data
+
+
+def _llm_routing_enabled() -> bool:
+    value = os.environ.get("BIOCLAW_LLM_ROUTING", "true").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _llm_json(system: str, user: str, max_tokens: int = 160) -> dict:
+    provider = (
+        os.environ.get("BIOCLAW_ROUTER_PROVIDER")
+        or os.environ.get("BIOCLAW_INTERPRETER_PROVIDER")
+        or os.environ.get("LLM_PROVIDER")
+        or os.environ.get("provider")
+        or "OpenRouter"
+    ).strip()
+    try:
+        import lib_llm_ext
+        raw = lib_llm_ext.callProvider(provider, system + ":-:-:-:" + user, max_tokens=max_tokens, reasoning="low")
+    except Exception as exc:
+        print(f"[BIOCLAW_ROUTER] LLM routing failed: {exc}", flush=True)
+        return {}
+    return _parse_json_object(raw)
+
+
+def _parse_json_object(text: str) -> dict:
+    raw = str(text or "").strip()
+    raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"\s*```$", "", raw)
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start < 0 or end < start:
+        return {}
+    try:
+        obj = json.loads(raw[start:end + 1])
+    except Exception:
+        return {}
+    return obj if isinstance(obj, dict) else {}
 
 
 def route_last_results(lastresults: str) -> str:
@@ -336,6 +526,38 @@ def _normalize_edge_type(edge: str) -> str:
     return aliases.get(key, key.replace(" ", "_"))
 
 
+def _normalize_neighbor_label(neighbor: str) -> str:
+    key = re.sub(r"[_-]+", " ", str(neighbor or "").strip().lower())
+    key = re.sub(r"\s+", " ", key)
+    aliases = {
+        "mf": "molecular function",
+        "molecular functions": "molecular function",
+        "molecular function": "molecular function",
+        "bp": "biological process",
+        "biological processes": "biological process",
+        "biological process": "biological process",
+        "cc": "cellular component",
+        "cellular components": "cellular component",
+        "cellular component": "cellular component",
+        "enhancers": "enhancer",
+        "enhancer": "enhancer",
+        "regulatory enhancer": "enhancer",
+        "regulatory elements": "enhancer",
+        "regulatory element": "enhancer",
+        "diseases": "disease",
+        "disease": "disease",
+        "phenotype": "disease",
+        "phenotypes": "disease",
+        "pathways": "pathway",
+        "pathway": "pathway",
+        "transcripts": "transcript",
+        "transcript": "transcript",
+        "proteins": "protein",
+        "protein": "protein",
+    }
+    return aliases.get(key, key.replace(" ", "_"))
+
+
 def _normalize_entity_phrase(entity: str) -> str:
     text = re.sub(r"\s+", " ", str(entity).strip().strip('"').strip("'")).strip()
     text = re.sub(
@@ -345,6 +567,13 @@ def _normalize_entity_phrase(entity: str) -> str:
         flags=re.IGNORECASE,
     )
     return text.strip()
+
+
+def _intent_edge_values(intent: dict) -> tuple:
+    source = _normalize_entity_phrase(intent.get("source", ""))
+    edge = _normalize_edge_type(intent.get("edge", ""))
+    target = _normalize_entity_phrase(intent.get("target", ""))
+    return source, edge, target
 
 
 def _source_aggregate_request(text: str):
