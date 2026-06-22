@@ -2,7 +2,7 @@
 #
 # This is a curated subset of the human BioCypher schema_config.yaml
 # (https://github.com/biocypher / rejuve-bio/biocypher-kg), restricted to the
-# 5-entity slice currently loaded into our Neo4j instance:
+# test slice currently loaded into the configured BioKG backend:
 #
 #   gene, protein, transcript, pathway, GO terms (BP/MF/CC), disease
 #
@@ -10,11 +10,11 @@
 # set BIOCLAW_SCHEMA_FILE=/path/to/hsa_schema_config.yaml in .env.
 #
 # The loader (overlay/src/biokg.py) extracts:
-#   - For nodes: the `input_label` (the Neo4j label) and the property
+#   - For nodes: the `input_label` (the backend label) and the property
 #     annotated `biolink: name` (the human-readable name property).
 #     Inherits the name property from `is_a` parent if not declared locally.
-#   - For edges: the `input_label` (or `output_label` if present — Neo4j uses
-#     output_label when set), `source`, and `target`. Used to validate that
+#   - For edges: the `input_label` (or `output_label` if present), `source`,
+#     and `target`. Used to validate that
 #     `biokg-stage` proposals don't violate the schema.
 
 # ─── Parent ontology class ──────────────────────────────────────────────────
@@ -44,6 +44,7 @@ ontology term:
       type: str
       biolink: source_web_page
 
+# ─── Nodes loaded today ─────────────────────────────────────────────────────
 gene:
   represented_as: node
   preferred_id: ensemble
@@ -208,6 +209,7 @@ enhancer:
       type: str
       biolink: source_web_page
 
+# ─── Edges loaded today ─────────────────────────────────────────────────────
 transcribes to:
   represented_as: edge
   is_a: expression

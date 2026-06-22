@@ -1,3 +1,27 @@
+"""BioKG access layer — backend-agnostic.
+
+Phase 2A: Neo4j backend (active). MORK/AtomSpace backend (stub).
+Phase 2B: staging area + human-approval workflow (stage_edge / list_staging /
+          promote / reject) on top of the same backend.
+
+Switching backends is a single env var flip:
+    BIOKG_BACKEND=neo4j    (default; needs NEO4J_URI/USER/PASSWORD)
+    BIOKG_BACKEND=mork     (future; needs MORK_URI etc.)
+    BIOKG_BACKEND=disabled (returns a friendly error from every call)
+
+The skill API exposed to MeTTa:
+    biokg.lookup(name)        — entity-name lookup (LLM-friendly summary)
+    biokg.query(query_string) — escape hatch for raw queries
+    biokg.stage_pipe(combined) — propose new edge (SOURCE|EDGE|TARGET|EVIDENCE)
+    biokg.list_staging()      — enumerate pending proposals
+    biokg.promote(staging_id) — move proposal into BioKG (human-approved)
+    biokg.reject(staging_id)  — discard proposal
+
+Staging design: every staged edge gets the property `_staging_id` plus
+provenance fields (`_staged_by`, `_staged_at`, `_evidence`, `_confidence`,
+`_status`). Promote = strip those properties (the edge is now indistinguishable
+from "truth"). Reject = delete the edge. Same KG, no schema split.
+"""
 import os
 import re
 import subprocess
@@ -10,69 +34,9 @@ from typing import Any, Optional
 _lock = threading.Lock()
 _backend = None  # lazily constructed singleton
 
-# ─── Evidence → truth-value mapping (for PLN merge) ─────────────────────────
-# GO Consortium evidence codes → (frequency, confidence). Higher confidence
-# means stronger empirical/curatorial support. Reference:
-# http://geneontology.org/docs/guide-go-evidence-codes/
-EVIDENCE_CODE_STV: dict = {
-    # Experimental — high direct evidence
-    "EXP": (1.0, 0.92),
-    "IDA": (1.0, 0.92),
-    "IPI": (1.0, 0.88),
-    "IMP": (1.0, 0.87),
-    "IGI": (1.0, 0.85),
-    "IEP": (1.0, 0.65),
-    # High-throughput experimental
-    "HTP": (1.0, 0.70),
-    "HDA": (1.0, 0.78),
-    "HMP": (1.0, 0.78),
-    "HGI": (1.0, 0.78),
-    "HEP": (1.0, 0.70),
-    # Phylogenetic
-    "IBA": (1.0, 0.75),
-    "IBD": (1.0, 0.70),
-    "IKR": (1.0, 0.50),
-    "IRD": (1.0, 0.50),
-    # Computational
-    "ISS": (1.0, 0.55),
-    "ISO": (1.0, 0.55),
-    "ISA": (1.0, 0.50),
-    "ISM": (1.0, 0.50),
-    "RCA": (1.0, 0.55),
-    # Author / curator
-    "TAS": (1.0, 0.85),
-    "NAS": (1.0, 0.60),
-    "IC":  (1.0, 0.75),
-    # Electronic (most common, lowest confidence)
-    "IEA": (1.0, 0.50),
-    # No data
-    "ND":  (0.5, 0.10),
-}
-
-# Source-based stv used when no GO evidence code is recorded
-# (structural edges like transcribes_to, participates_in, etc.).
-SOURCE_STV: dict = {
-    "gencode":                  (1.0, 0.92),
-    "uniprot":                  (1.0, 0.90),
-    "reactome":                 (1.0, 0.85),
-    "gaf":                      (1.0, 0.70),
-    "agr":                      (1.0, 0.80),
-    "hpo":                      (1.0, 0.75),
-    "do":                       (1.0, 0.75),
-    "go":                       (1.0, 0.80),
-    "goa":                      (1.0, 0.70),
-    "gene ontology":            (1.0, 0.80),
-    "disease ontology":         (1.0, 0.75),
-    "human phenotype ontology": (1.0, 0.75),
-    # Regulatory-region sources (enhancer–gene associations).
-    # Confidence reflects each method's curation depth, not absolute truth.
-    "peregrine":                (1.0, 0.80),  # multi-evidence curated links
-    "enhancer atlas":           (1.0, 0.65),  # tissue-specific predictions
-    "encode_re2g":              (1.0, 0.55),  # ML-predicted enhancer-gene
-    "ccre":                     (1.0, 0.60),  # candidate cis-regulatory elements
-}
-
-DEFAULT_STV = (1.0, 0.50)
+REASONING_DEFAULT_PATH = "/opt/bioclaw/config/reasoning.yaml"
+_reasoning_singleton: Optional[dict] = None
+_reasoning_lock = threading.Lock()
 
 
 def _evidence_stv(evidence_code: Optional[str], source: Optional[str],
@@ -84,7 +48,7 @@ def _evidence_stv(evidence_code: Optional[str], source: Optional[str],
       2. edge_score (numeric)      — normalized per-source to [0, 1]
       3. evidence_code             — GO Consortium reliability mapping
       4. source token              — methodology baseline
-      5. DEFAULT_STV               — last resort
+      5. configured default_stv    — last resort
     """
     # 1. Per-edge confidence (already in [0, 1])
     if edge_confidence is not None:
@@ -108,38 +72,104 @@ def _evidence_stv(evidence_code: Optional[str], source: Optional[str],
     # 3. GO Consortium evidence code
     if evidence_code:
         code = str(evidence_code).strip().upper()
-        if code in EVIDENCE_CODE_STV:
-            return EVIDENCE_CODE_STV[code]
+        configured = _configured_stv("evidence_code_stv", code)
+        if configured is not None:
+            return configured
 
     # 4. Source baseline
     if source:
         src = str(source).strip().lower()
-        if src in SOURCE_STV:
-            return SOURCE_STV[src]
+        configured = _configured_stv("source_stv", src)
+        if configured is not None:
+            return configured
 
-    return DEFAULT_STV
+    return _default_stv()
 
 
 def _normalize_score(score: float, source: str) -> Optional[float]:
-    """Source-specific score → confidence normalization. Returns None if the
-    source's score scale is unknown — caller then falls back to baseline."""
+    """Source-specific score → confidence normalization from reasoning.yaml."""
     import math
     src = str(source).strip().lower()
-    if src == "peregrine":
-        # PEREGRINE CDFscore is already [0, 1]. If score happens to be > 1,
-        # clamp; biologically the raw score column may also appear here.
+    rule = (_load_reasoning().get("score_normalization") or {}).get(src)
+    if not isinstance(rule, dict):
+        return None
+    kind = str(rule.get("type") or "").strip().lower()
+    if kind == "clamp_0_1":
         return min(1.0, max(0.0, score))
-    if src in ("enhancer atlas", "enhanceratlas"):
-        # EnhancerAtlas conservation scores typically ~1–15. Sigmoid centered
-        # at 5 maps the bulk into [0.5, 0.95].
-        return 1.0 / (1.0 + math.exp(-(score - 5.0) / 3.0))
-    if src in ("encode_re2g", "encode"):
-        # ABC-style score already [0, 1].
-        return min(1.0, max(0.0, score))
-    if src == "ccre":
-        # cCRE inverse-distance — assume score is already a strength signal.
-        return min(1.0, max(0.0, score))
+    if kind == "sigmoid":
+        center = float(rule.get("center", 0.0))
+        scale = float(rule.get("scale", 1.0)) or 1.0
+        return 1.0 / (1.0 + math.exp(-(score - center) / scale))
     return None
+
+
+def _load_reasoning() -> dict:
+    global _reasoning_singleton
+    if _reasoning_singleton is not None:
+        return _reasoning_singleton
+    with _reasoning_lock:
+        if _reasoning_singleton is not None:
+            return _reasoning_singleton
+        path = os.environ.get("BIOCLAW_REASONING_FILE", REASONING_DEFAULT_PATH)
+        if not os.path.exists(path):
+            _reasoning_singleton = {}
+            return _reasoning_singleton
+        try:
+            import yaml
+            with open(path, encoding="utf-8") as f:
+                raw = yaml.safe_load(f) or {}
+            _reasoning_singleton = raw if isinstance(raw, dict) else {}
+            print(f"[BIOKG] loaded reasoning config from {path}")
+        except Exception as exc:
+            print(f"[BIOKG] reasoning config load failed ({exc}); using fallback defaults")
+            _reasoning_singleton = {}
+        return _reasoning_singleton
+
+
+def _configured_stv(section: str, key: str) -> Optional[tuple]:
+    values = (_load_reasoning().get(section) or {})
+    if not isinstance(values, dict):
+        return None
+    raw = values.get(str(key).strip().lower()) or values.get(str(key).strip().upper()) or values.get(str(key).strip())
+    return _coerce_stv(raw)
+
+
+def _configured_list(section: str) -> list:
+    raw = _load_reasoning().get(section) or []
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [str(v).strip() for v in raw if str(v).strip()]
+
+
+def _default_stv() -> tuple:
+    return _coerce_stv(_load_reasoning().get("default_stv")) or (1.0, 0.5)
+
+
+def _act_threshold() -> float:
+    try:
+        return float(_load_reasoning().get("action_threshold", 0.5))
+    except (TypeError, ValueError):
+        return 0.5
+
+
+def _coerce_stv(raw) -> Optional[tuple]:
+    if isinstance(raw, dict):
+        raw = [raw.get("frequency"), raw.get("confidence")]
+    if isinstance(raw, (list, tuple)) and len(raw) >= 2:
+        try:
+            return float(raw[0]), float(raw[1])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _confidence_action_phrase(confidence: float) -> tuple:
+    threshold = _act_threshold()
+    act = "actionable" if confidence >= threshold else f"below ACT {threshold:g} — hypothesize only"
+    cmp_op = ">=" if confidence >= threshold else "<"
+    return act, cmp_op, threshold
 
 
 def _fmt_stv(fc: tuple) -> str:
@@ -396,10 +426,9 @@ def pln_source_aggregate_pipe(combined: str) -> str:
     groups edges by `source`, computes per-source mean confidence, then
     PLN-merges those per-source means.
 
-    Answers questions like "is GENE enhancer-regulated, integrating
-    PEREGRINE + Enhancer Atlas?" — where different methods catch different
-    specific edges (no per-edge overlap) but each method aggregates into a
-    method-level confidence about TARGET.
+    Answers questions where different methods catch different specific edges
+    for the same schema relation (no per-edge overlap), but each method
+    aggregates into a method-level confidence about TARGET.
     """
     s = str(combined).strip().strip('"').strip("'").strip()
     parts = [p.strip() for p in s.split("|")]
@@ -450,21 +479,39 @@ def schema_neighbor_lookup_pipe(combined: str) -> str:
     return _get_backend().schema_neighbor_lookup(target, neighbor_label)
 
 
+def schema_intent_options() -> dict:
+    schema = _load_schema()
+    if schema is None:
+        return {"entities": [], "edges": []}
+    return schema.intent_options()
+
+
+def schema_resolve_neighbor_label(phrase: str) -> str:
+    schema = _load_schema()
+    return _schema_label_for_phrase(schema, phrase) or ""
+
+
+def schema_canonical_edge(edge_label: str) -> str:
+    return _schema_edge_canonical(_load_schema(), edge_label)
+
+
 def functional_summary(name: str) -> str:
-    """Compact schema-derived gene activity summary for broad 'what does X do?' questions."""
+    """Compact schema-derived activity summary for broad 'what does X do?' questions."""
     target = _normalize_entity_query_name(name)
     if not target:
         return "error: biokg-functional-summary requires a non-empty name"
     backend = _get_backend()
+    schema = _load_schema()
+    resolved = None
+    try:
+        resolved = backend._resolve_name(target)
+    except Exception:
+        resolved = None
+    if schema is None or not resolved:
+        return lookup(target)
+    target_label, _ = resolved
     segments = []
-    for neighbor in (
-        "molecular function",
-        "biological process",
-        "cellular component",
-        "pathway",
-        "enhancer",
-        "disease",
-    ):
+    for neighbor in schema.neighbor_labels_for(target_label):
         result = backend.schema_neighbor_lookup(target, neighbor)
         if result.startswith(("error:", "biokg unavailable")):
             continue
@@ -479,12 +526,16 @@ def functional_summary(name: str) -> str:
 def _normalize_entity_query_name(name: str) -> str:
     text = str(name).strip().strip('"').strip("'").strip()
     text = re.sub(r"\s+", " ", text)
-    text = re.sub(
-        r"^(?:the\s+)?(?:gene|protein|transcript|pathway|disease|enhancer)\s+",
-        "",
-        text,
-        flags=re.IGNORECASE,
-    )
+    labels = []
+    schema = _load_schema()
+    if schema is not None:
+        for entity in schema.intent_options().get("entities", []):
+            for label_text in (entity.get("label"), entity.get("schema_name")):
+                if label_text:
+                    labels.append(str(label_text).replace("_", " "))
+    if labels:
+        alternatives = "|".join(re.escape(v) for v in sorted(set(labels), key=len, reverse=True))
+        text = re.sub(rf"^(?:the\s+)?(?:{alternatives})\s+", "", text, flags=re.IGNORECASE)
     return text.strip()
 
 
@@ -598,7 +649,7 @@ class Schema:
         return "id"
 
     def _entity_label(self, entity_name: str) -> str:
-        """Convert an `is_a` / `source` / `target` entity-name into a Neo4j label
+        """Convert an `is_a` / `source` / `target` entity-name into a backend label
         (uses input_label if present)."""
         body = self._raw.get(entity_name)
         if isinstance(body, dict):
@@ -623,6 +674,38 @@ class Schema:
     def entity_name_prop(self, label: str) -> Optional[str]:
         info = self.entities.get(label)
         return info["name_prop"] if info else None
+
+    def intent_options(self) -> dict:
+        return {
+            "entities": [
+                {
+                    "label": label,
+                    "schema_name": info.get("entity_name", label),
+                }
+                for label, info in sorted(self.entities.items())
+            ],
+            "edges": [
+                {
+                    "label": label,
+                    "aliases": sorted(set(edge.get("aliases", []))),
+                    "pairs": [
+                        {"source": source, "target": target}
+                        for source, target in edge.get("pairs", [])
+                    ],
+                }
+                for label, edge in sorted(self.edges.items())
+            ],
+        }
+
+    def neighbor_labels_for(self, label: str) -> list:
+        labels = []
+        for edge in self.edges.values():
+            for source, target in edge.get("pairs", []):
+                if source == label and target not in labels:
+                    labels.append(target)
+                if target == label and source not in labels:
+                    labels.append(source)
+        return labels
 
     def validate_edge(self, edge_label: str, source_label: str, target_label: str):
         """Return (ok: bool, reason: str)."""
@@ -1640,11 +1723,10 @@ class Neo4jBackend:
             return f"BioKG found evidence for {edge_phrase}, but PLN revision failed. Sources: {sources_str}"
 
         f_m, c_m = merged
-        act = "actionable" if c_m >= 0.5 else "below ACT 0.5 — hypothesize only"
-        cmp_op = ">=" if c_m >= 0.5 else "<"
+        act, cmp_op, act_threshold = _confidence_action_phrase(c_m)
         return (
             f"BioKG found {len(sources)} evidence sources for {edge_phrase}: {sources_str}. "
-            f"PLN revision merges them to {_fmt_stv(merged)}; confidence {c_m:.3f} {cmp_op} ACT 0.5, so this is {act}."
+            f"PLN revision merges them to {_fmt_stv(merged)}; confidence {c_m:.3f} {cmp_op} ACT {act_threshold:g}, so this is {act}."
         )
 
     def pln_schema_neighbor_aggregate(self, target_name: str, neighbor_label: str) -> str:
@@ -1837,11 +1919,10 @@ class Neo4jBackend:
             return f"BioKG found '{safe_edge_type}' evidence connected to {t_name}, but the cross-source PLN merge failed. Sources: {sources_str}"
 
         f_m, c_m = merged
-        act = "actionable" if c_m >= 0.5 else "below ACT 0.5 — hypothesize only"
-        cmp_op = ">=" if c_m >= 0.5 else "<"
+        act, cmp_op, act_threshold = _confidence_action_phrase(c_m)
         return (
             f"BioKG found '{safe_edge_type}' evidence connected to {t_name} from {len(stvs)} sources: {sources_str}. "
-            f"PLN cross-source revision gives {_fmt_stv(merged)}; confidence {c_m:.3f} {cmp_op} ACT 0.5, so this is {act}."
+            f"PLN cross-source revision gives {_fmt_stv(merged)}; confidence {c_m:.3f} {cmp_op} ACT {act_threshold:g}, so this is {act}."
         )
 
     def _format_lookup(self, name: str, rows: list, multihop_rows: Optional[list] = None) -> str:
@@ -2945,6 +3026,46 @@ class MorkBackend:
         if key in edges:
             staging_origin.add(key)
 
+    def _edge_annotation_values(self, edge_atom: str, annotations: list) -> dict:
+        """Return configured annotation values attached to one exact edge atom."""
+        import uuid
+        values = {}
+        for annotation in annotations:
+            safe_annotation = "".join(
+                c for c in str(annotation).strip() if c.isalnum() or c == "_"
+            )
+            if not safe_annotation:
+                continue
+            tag = f"bioclaw_edge_ann_{safe_annotation}_{uuid.uuid4().hex[:8]}"
+            raw = self._transform(
+                patterns=[f"({safe_annotation} {edge_atom} $val)"],
+                template=f"({tag} $val)",
+            )
+            for line in raw:
+                s = line.strip()
+                if not (s.startswith("(") and s.endswith(")")):
+                    continue
+                inner = s[1:-1].strip()
+                if not inner.startswith(tag):
+                    continue
+                value = inner[len(tag):].strip()
+                if value:
+                    values.setdefault(safe_annotation, []).append(value)
+        return values
+
+    def _first_numeric_edge_annotation(self, edge_atom: str, annotations: list):
+        values = self._edge_annotation_values(edge_atom, annotations)
+        for annotation in annotations:
+            safe_annotation = "".join(
+                c for c in str(annotation).strip() if c.isalnum() or c == "_"
+            )
+            for value in values.get(safe_annotation, []):
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    continue
+        return None
+
     def describe_source(self, key: str) -> str:
         if not self._datasources:
             return f"no data-source registry loaded; cannot resolve {key!r}"
@@ -3005,6 +3126,12 @@ class MorkBackend:
         # The edge atom as a literal pattern. Joined with all source +
         # evidence annotations in a single transform.
         edge_atom = f"({safe_edge_type} ({s_label} {s_id}) ({t_label} {t_id}))"
+        edge_confidence = self._first_numeric_edge_annotation(
+            edge_atom, _configured_list("edge_confidence_annotations")
+        )
+        edge_score = self._first_numeric_edge_annotation(
+            edge_atom, _configured_list("edge_score_annotations")
+        )
         tag = f"bioclaw_merge_{uuid.uuid4().hex[:12]}"
         scratch = f"({tag} $src $ev)"
 
@@ -3037,7 +3164,7 @@ class MorkBackend:
             if (src, ev) in seen_pairs:
                 continue
             seen_pairs.add((src, ev))
-            f, c = _evidence_stv(ev, src, edge_confidence=None, edge_score=None)
+            f, c = _evidence_stv(ev, src, edge_confidence=edge_confidence, edge_score=edge_score)
             if src and ev:
                 label = f"{src}/{ev}"
             elif src:
@@ -3092,7 +3219,7 @@ class MorkBackend:
                     if (src, ev) in seen_pairs:
                         continue
                     seen_pairs.add((src, ev))
-                    f, c = _evidence_stv(ev, src, edge_confidence=None, edge_score=None)
+                    f, c = _evidence_stv(ev, src, edge_confidence=edge_confidence, edge_score=edge_score)
                     if src and ev:
                         label = f"{src}/{ev}"
                     elif src:
@@ -3128,10 +3255,9 @@ class MorkBackend:
             return f"BioKG found evidence for {edge_phrase}, but PLN revision failed. Sources: {sources_str}"
 
         f_m, c_m = merged
-        act = "actionable" if c_m >= 0.5 else "below ACT 0.5 — hypothesize only"
-        cmp_op = ">=" if c_m >= 0.5 else "<"
+        act, cmp_op, act_threshold = _confidence_action_phrase(c_m)
         return (f"BioKG found {len(sources_info)} evidence sources for {edge_phrase}: {sources_str}. "
-                f"PLN revision merges them to {_fmt_stv(merged)}; confidence {c_m:.3f} {cmp_op} ACT 0.5, so this is {act}.")
+                f"PLN revision merges them to {_fmt_stv(merged)}; confidence {c_m:.3f} {cmp_op} ACT {act_threshold:g}, so this is {act}.")
 
     def pln_schema_neighbor_aggregate(self, target_name: str, neighbor_label: str) -> str:
         if self._schema is None:
@@ -3309,7 +3435,7 @@ class MorkBackend:
         # double-counted (most edges only appear in one direction anyway).
         seen = set()
         per_source: dict = {}
-        for tag, raw in [(in_tag, raw_in), (out_tag, raw_out)]:
+        for direction, tag, raw in [("in", in_tag, raw_in), ("out", out_tag, raw_out)]:
             for line in raw:
                 s = line.strip()
                 if not (s.startswith("(") and s.endswith(")")):
@@ -3329,8 +3455,18 @@ class MorkBackend:
                 if key in seen:
                     continue
                 seen.add(key)
+                if direction == "in":
+                    edge_atom = f"({safe_edge_type} ({o_label} {o_id}) ({t_label} {t_id}))"
+                else:
+                    edge_atom = f"({safe_edge_type} ({t_label} {t_id}) ({o_label} {o_id}))"
+                edge_confidence = self._first_numeric_edge_annotation(
+                    edge_atom, _configured_list("edge_confidence_annotations")
+                )
+                edge_score = self._first_numeric_edge_annotation(
+                    edge_atom, _configured_list("edge_score_annotations")
+                )
                 _f, c = _evidence_stv(
-                    None, src, edge_confidence=None, edge_score=None,
+                    None, src, edge_confidence=edge_confidence, edge_score=edge_score,
                 )
                 per_source.setdefault(src, []).append(c)
 
@@ -3383,6 +3519,12 @@ class MorkBackend:
                     edge_atom = f"({found_edge} ({o_label} {o_id}) ({t_label} {t_id}))"
                 else:
                     edge_atom = f"({found_edge} ({t_label} {t_id}) ({o_label} {o_id}))"
+                edge_confidence = self._first_numeric_edge_annotation(
+                    edge_atom, _configured_list("edge_confidence_annotations")
+                )
+                edge_score = self._first_numeric_edge_annotation(
+                    edge_atom, _configured_list("edge_score_annotations")
+                )
                 src_tag = f"bioclaw_agg_src_{uuid.uuid4().hex[:12]}"
                 raw_sources = self._transform(
                     patterns=[f"(source {edge_atom} $src)"],
@@ -3402,7 +3544,7 @@ class MorkBackend:
                         continue
                     seen.add(key)
                     _f, c = _evidence_stv(
-                        None, src, edge_confidence=None, edge_score=None,
+                        None, src, edge_confidence=edge_confidence, edge_score=edge_score,
                     )
                     per_source.setdefault(src, []).append(c)
                     found_source = True
@@ -3413,7 +3555,7 @@ class MorkBackend:
                         continue
                     seen.add(key)
                     _f, c = _evidence_stv(
-                        None, src, edge_confidence=None, edge_score=None,
+                        None, src, edge_confidence=edge_confidence, edge_score=edge_score,
                     )
                     per_source.setdefault(src, []).append(c)
 
@@ -3451,11 +3593,10 @@ class MorkBackend:
             return f"BioKG found '{safe_edge_type}' evidence connected to {t_display}, but the cross-source PLN merge failed. Sources: {sources_str}"
 
         f_m, c_m = merged
-        act = "actionable" if c_m >= 0.5 else "below ACT 0.5 — hypothesize only"
-        cmp_op = ">=" if c_m >= 0.5 else "<"
+        act, cmp_op, act_threshold = _confidence_action_phrase(c_m)
         return (
             f"BioKG found '{safe_edge_type}' evidence connected to {t_display} from {len(stvs)} sources: {sources_str}. "
-            f"PLN cross-source revision gives {_fmt_stv(merged)}; confidence {c_m:.3f} {cmp_op} ACT 0.5, so this is {act}."
+            f"PLN cross-source revision gives {_fmt_stv(merged)}; confidence {c_m:.3f} {cmp_op} ACT {act_threshold:g}, so this is {act}."
         )
 
 
@@ -3525,7 +3666,8 @@ def _format_lookup_result(name: str, rows: list, multihop_rows: Optional[list] =
     ]
     rendered = []
     total = 0
-    for group in group_order:
+    dynamic_group_order = group_order + sorted(set(groups) - set(group_order))
+    for group in dynamic_group_order:
         values = groups.get(group, [])
         if not values:
             continue
@@ -3583,20 +3725,9 @@ def _format_schema_neighbor_lookup_result(target_name: str, target_label: str,
 
 
 def _schema_neighbor_opening(target_name: str, neighbor_label: str, edges: list) -> str:
-    edge_set = set(edges or [])
-    if neighbor_label == "molecular_function" or "enables" in edge_set:
-        return f"{target_name} enables molecular functions."
-    if neighbor_label == "biological_process" or "involved_in" in edge_set:
-        return f"{target_name} is involved in biological processes."
-    if neighbor_label == "cellular_component" or "located_in" in edge_set:
-        return f"{target_name} is annotated to cellular components."
-    if neighbor_label == "pathway" or "participates_in" in edge_set:
-        return f"{target_name} participates in pathways."
-    if neighbor_label == "enhancer":
-        return f"{target_name} has enhancer associations."
-    if neighbor_label == "disease":
-        return f"{target_name} has disease associations."
-    return f"{target_name} is connected to {_friendly_label(neighbor_label)} nodes."
+    edge_text = ", ".join(sorted(set(edges or [])))
+    edge_note = f" through schema edge(s) {edge_text}" if edge_text else ""
+    return f"{target_name} is connected to {_friendly_label(neighbor_label)} nodes{edge_note}."
 
 
 def _sentence_group_label(group: str) -> str:
@@ -3630,21 +3761,21 @@ def _friendly_label(label: str) -> str:
 
 
 def _lookup_group(rel: str, target_label: str, outgoing: bool) -> str:
-    rel = str(rel or "").lower()
     target_label = str(target_label or "").lower()
-    if target_label == "molecular_function" or rel == "enables":
+    if target_label == "molecular_function":
         return "Molecular functions"
-    if target_label == "biological_process" or rel in ("involved_in", "participates_in"):
+    if target_label == "biological_process":
         return "Biological processes"
     if target_label == "pathway":
         return "Pathways"
-    if target_label in ("disease", "phenotype") or rel in ("is_implicated_in", "has_phenotype"):
+    if target_label in ("disease", "phenotype"):
         return "Diseases and phenotypes"
-    if target_label == "enhancer" or rel in ("associated_with", "regulates"):
+    if target_label == "enhancer":
         return "Regulatory associations"
-    if target_label in ("protein", "transcript") or rel in ("translates_to", "transcribes_to"):
+    if target_label in ("protein", "transcript"):
         return "Gene products"
-    return "Other links"
+    label = _friendly_label(target_label).capitalize()
+    return f"{label} links" if label and label != "?" else "Other links"
 
 
 def _readable_examples(values: list, limit: int) -> list:

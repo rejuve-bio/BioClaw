@@ -89,18 +89,11 @@ def interpret(role: str, tool_call: str, user_text: str, raw_result: str) -> str
 
 
 def _aggregate_interpretation(lower_context: str) -> str:
-    if "enhancer" in lower_context:
-        return (
-            "this is enhancer-gene association evidence; it suggests possible enhancer regulation, "
-            "but it is not direct causal proof by itself."
-        )
-    if "disease" in lower_context or "phenotype" in lower_context:
-        return (
-            "this is KG disease or phenotype association support, useful for prioritization, "
-            "not a clinical assertion by itself."
-        )
     if "pln cross-source revision" in lower_context:
-        return "multiple source groups support this relation class, so the result is stronger than a single-source lookup."
+        return (
+            "multiple source groups support this schema relation, so the result is stronger "
+            "than a single-source lookup; it is still KG support, not independent causal proof."
+        )
     return ""
 
 
@@ -116,8 +109,8 @@ def _caveats_for(lower_context: str, raw: str) -> list:
         "biokg.pln_schema_neighbor_aggregate_pipe" in lower_context
         or "biokg.pln_source_aggregate_pipe" in lower_context
     )
-    if "enhancer" in lower_context and "associated_with" in lower_context and not aggregate_tool:
-        caveats.append("Enhancer associations are evidence for possible regulation, not proof of direct regulatory mechanism.")
+    if "associated_with" in lower_context and not aggregate_tool:
+        caveats.append("Association edges are KG support for a relationship, not proof of direct mechanism by themselves.")
     return _dedupe(caveats)
 
 

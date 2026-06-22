@@ -26,7 +26,7 @@ each source's evidence_code or recorded confidence to a truth value, and
 applies PLN's Truth_Revision to produce a single deterministic stv.
 
 Phrases that map here:
-  - "reconcile X enables Y"
+  - "reconcile SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY"
   - "merge evidence for X edge_type Y"
   - "what's the merged confidence for X edge_type Y"
   - "contradictions for X edge_type Y"
@@ -42,9 +42,9 @@ aggregate confidence, merges via PLN revision.
 
 Phrases that map here:
   - "cross-method confidence for X"
-  - "consensus on X regulation"
+  - "consensus on TARGET_ENTITY under a schema relation"
   - "aggregate evidence for X edge_type"
-  - "overall confidence that X is regulated / annotated / implicated"
+  - "overall confidence for TARGET_ENTITY under a schema relation"
 
 When a natural relationship phrase names a neighboring node type rather than
 an explicit edge type, use the schema-derived form:
@@ -52,8 +52,8 @@ an explicit edge type, use the schema-derived form:
 
 This resolves TARGET's node label, finds the loaded schema edge connecting it
 to NEIGHBOR_LABEL, then runs the same source aggregate with that edge and
-neighbor-label filter. Use it for phrases such as "is X enhancer-regulated" or
-"is X disease-associated" when the edge is implied by the schema.
+neighbor-label filter. Use it for natural relation phrases when the edge is
+implied by the loaded schema.
 
 ────────────────────────────────────────────────────────────────────────
 3. Phase 2 backlog: chain confidence
@@ -74,8 +74,8 @@ Action:
 This deployment does not implement biokg-pln-compose-belief yet.
 
 Phrases that map here:
-  - "given X is involved_in Y and Y participates_in Z, what's the confidence X relates to Z?"
-  - "compose belief that X is associated_with Z via Y"
+  - "given SOURCE EDGE_A INTERMEDIATE and INTERMEDIATE EDGE_B TARGET, what's the confidence SOURCE relates to TARGET?"
+  - "compose belief that SOURCE relates to TARGET via INTERMEDIATE"
   - "transitive confidence X -> Y -> Z"
   - any "given A, given B, what about C?" composition
 
@@ -185,8 +185,8 @@ biokg-pln-evidence-merge SOURCE_ENTITY|EDGE_TYPE|TARGET_ENTITY
 send <merge block from RESULTS verbatim, all stv values preserved>
 
 # source-aggregate (one target, all sources)
-Q: peer (reasoner-request): Is TARGET_ENTITY enhancer-regulated?
-biokg-pln-schema-neighbor-aggregate TARGET_ENTITY|enhancer
+Q: peer (reasoner-request): Is TARGET_ENTITY connected to NEIGHBOR_LABEL?
+biokg-pln-schema-neighbor-aggregate TARGET_ENTITY|NEIGHBOR_LABEL
 (next turn)
 send <source-aggregate block from RESULTS verbatim>
 
@@ -195,7 +195,7 @@ Q: peer (reasoner-request): What's the chain confidence from SOURCE_ENTITY to TA
 send That formal reasoning skill is planned for Phase 2; Phase 1 currently supports per-edge evidence merge and cross-method aggregate.
 
 # compose-belief
-Q: peer (reasoner-request): Given SOURCE_ENTITY is involved_in INTERMEDIATE_ENTITY and INTERMEDIATE_ENTITY participates_in TARGET_ENTITY, what's the confidence SOURCE_ENTITY relates to TARGET_ENTITY?
+Q: peer (reasoner-request): Given SOURCE_ENTITY EDGE_A INTERMEDIATE_ENTITY and INTERMEDIATE_ENTITY EDGE_B TARGET_ENTITY, what's the confidence SOURCE_ENTITY relates to TARGET_ENTITY?
 send That formal reasoning skill is planned for Phase 2; Phase 1 currently supports per-edge evidence merge and cross-method aggregate.
 
 # hypothesize
@@ -203,7 +203,7 @@ Q: peer (reasoner-request): Generate hypotheses for new SOURCE_ENTITY functions
 send That formal reasoning skill is planned for Phase 2; Phase 1 currently supports per-edge evidence merge and cross-method aggregate.
 
 # schema introspection
-Q: peer (reasoner-request): What edges exist between disease and ...
+Q: peer (reasoner-request): What schema edges exist between ENTITY_LABEL_A and ENTITY_LABEL_B?
 biokg-schema
 (next turn)
 send <schema summary verbatim>

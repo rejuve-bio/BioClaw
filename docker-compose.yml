@@ -39,6 +39,7 @@ x-common-env: &common-env
   BIOCLAW_NAME_PROPERTIES: ${BIOCLAW_NAME_PROPERTIES:-}
   BIOCLAW_SCHEMA_FILE: ${BIOCLAW_SCHEMA_FILE:-/opt/bioclaw/config/schema.yaml}
   BIOCLAW_DATASOURCE_FILE: ${BIOCLAW_DATASOURCE_FILE:-/opt/bioclaw/config/data_sources.yaml}
+  BIOCLAW_REASONING_FILE: ${BIOCLAW_REASONING_FILE:-/opt/bioclaw/config/reasoning.yaml}
   BIOKG_LOOKUP_MAX_DEPTH: ${BIOKG_LOOKUP_MAX_DEPTH:-2}
   BIOKG_LOOKUP_MULTIHOP_LIMIT: ${BIOKG_LOOKUP_MULTIHOP_LIMIT:-10}
   BIOCLAW_IRC_AUTH_REQUIRED: ${BIOCLAW_IRC_AUTH_REQUIRED:-false}
@@ -101,6 +102,9 @@ services:
       - ./overlay/assistant-prompt.txt:/opt/bioclaw/assistant-prompt.txt:ro
       - ./overlay/conductor-prompt.txt:/opt/bioclaw/conductor-prompt.txt:ro
       - ./overlay/reasoner-prompt.txt:/opt/bioclaw/reasoner-prompt.txt:ro
+      - ./overlay/config/schema.yaml:/opt/bioclaw/config/schema.yaml:ro
+      - ./overlay/config/data_sources.yaml:/opt/bioclaw/config/data_sources.yaml:ro
+      - ./overlay/config/reasoning.yaml:/opt/bioclaw/config/reasoning.yaml:ro
       # Patched main loop: rephrases the spam-shield directive so weaker LLMs
       # stop verbally acknowledging it instead of relaying RESULTS.
       - ./overlay/core/loop.metta:/PeTTa/repos/OmegaClaw-Core/src/loop.metta:ro
@@ -148,6 +152,9 @@ services:
       - ./overlay/assistant-prompt.txt:/opt/bioclaw/assistant-prompt.txt:ro
       - ./overlay/conductor-prompt.txt:/opt/bioclaw/conductor-prompt.txt:ro
       - ./overlay/reasoner-prompt.txt:/opt/bioclaw/reasoner-prompt.txt:ro
+      - ./overlay/config/schema.yaml:/opt/bioclaw/config/schema.yaml:ro
+      - ./overlay/config/data_sources.yaml:/opt/bioclaw/config/data_sources.yaml:ro
+      - ./overlay/config/reasoning.yaml:/opt/bioclaw/config/reasoning.yaml:ro
       - ./overlay/core/loop.metta:/PeTTa/repos/OmegaClaw-Core/src/loop.metta:ro
       - assistant-memory:/PeTTa/repos/OmegaClaw-Core/memory
     tmpfs:
@@ -192,6 +199,9 @@ services:
       - ./overlay/assistant-prompt.txt:/opt/bioclaw/assistant-prompt.txt:ro
       - ./overlay/conductor-prompt.txt:/opt/bioclaw/conductor-prompt.txt:ro
       - ./overlay/reasoner-prompt.txt:/opt/bioclaw/reasoner-prompt.txt:ro
+      - ./overlay/config/schema.yaml:/opt/bioclaw/config/schema.yaml:ro
+      - ./overlay/config/data_sources.yaml:/opt/bioclaw/config/data_sources.yaml:ro
+      - ./overlay/config/reasoning.yaml:/opt/bioclaw/config/reasoning.yaml:ro
       - ./overlay/core/loop.metta:/PeTTa/repos/OmegaClaw-Core/src/loop.metta:ro
       - reasoner-memory:/PeTTa/repos/OmegaClaw-Core/memory
     tmpfs:

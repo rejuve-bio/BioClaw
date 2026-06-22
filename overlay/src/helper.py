@@ -8,6 +8,7 @@ downstream parser doesn't blow up on imperfect agent output.
 Everything else is preserved verbatim from the upstream helper.py.
 """
 from collections import deque
+import os
 import re
 from datetime import datetime
 
@@ -103,16 +104,6 @@ KNOWN_SKILLS = {
     "send",
     # peer agents
     "ask-agent",
-    # BioClaw biokg-* skills (full surface — covers Phase 1 + planned skills)
-    "biokg-lookup", "biokg-query",
-    "biokg-stage", "biokg-list-staging", "biokg-promote", "biokg-reject",
-    "biokg-schema", "biokg-schema-neighbor", "biokg-schema-neighbor-lookup",
-    "biokg-provenance", "biokg-source",
-    "biokg-recent-autonomous",
-    "biokg-pln-evidence-merge", "biokg-pln-source-aggregate",
-    "biokg-pln-schema-neighbor-aggregate",
-    "biokg-pln-chain-confidence", "biokg-pln-compose-belief",
-    "biokg-nal-hypothesize",
     # MeTTa eval (raw NAL/PLN escape hatch)
     "metta",
     # Prolog import (used by skills.metta itself)
@@ -176,87 +167,47 @@ _SPAM_PATTERNS = [
     re.compile(r"^LAST_SKILL_USE_RESULTS:", re.IGNORECASE),
 ]
 
-# Internal-monologue starters — the LLM thinking out loud rather than producing
-# user-facing content. Drop sends that begin with these.
-#
-# Also catches LLM "acknowledgment" patterns where the model verbally responds
-# to a system directive (e.g. " DO NOT RE-SEND OR SPAM!" spam-shield feedback)
-# instead of doing the next skill call. With weak/medium LLMs (Minimax,
-# DeepSeek-chat, DeepSeek-reasoner) this is a major failure mode — the model
-# answers feedback as if it were a user instruction, blocking real work.
-_MONOLOGUE_STARTS = (
-    # — original internal-monologue patterns —
+_CONTROL_OUTPUT_STARTS = (
+    "no output",
+    "(no output",
+    "(empty turn",
+    "empty turn",
+)
+
+_ACK_ONLY = {
+    "acknowledged",
+    "understood",
+    "noted",
+    "got it",
+    "ok",
+    "okay",
+}
+
+_LEGACY_MONOLOGUE_STARTS = (
     "i should ",
     "i need to ",
-    "i will ",
-    "i've already",
-    "i have already",
     "let me ",
     "looking at ",
     "based on the ",
     "according to ",
-    "the instruction ",
     "the user is asking",
-    "the user's message",
-    "the user said",
-    "the previous request",
-    "the last request",
     "for this turn",
-    "this turn ",
-    "in this turn",
     "this is an empty turn",
-    "now i need to",
-    "since the ",
-    "no output - ",
-    "no output -",
-    "no output: ",
-    "no output",
-    "(no output",
-    "(empty turn",
-    # — acknowledgment patterns — LLM responding verbally instead of acting —
-    "acknowledged.",
-    "acknowledged,",
-    "understood.",
-    "understood,",
-    "noted.",
-    "noted,",
-    "got it.",
-    "got it,",
-    "i understand.",
-    "i understand,",
-    "i'll wait",
-    "i will wait",
-    "i'm ready",
-    "i am ready",
-    "i'll not",
-    "i will not re-send",
-    "i will not spam",
-    "okay!",
-    "ok,",
-    "ok!",
-    # — meta-commentary patterns — LLM narrating what's happening in RESULTS —
-    "i see the results",
-    "i see results",
-    "we see from results",
-    "looking at the results",
     "the results contain",
-    "results contain",
     "from the results",
-    "in the results",
-    "the previous attempt",
-    "the previous response",
-    "the previous turn",
-    "the current request is",
-    "the current turn",
-    # — Hi-again / repeated-greeting patterns from chatty LLMs —
-    "hi again",
-    "hello again",
 )
 
 
 def _looks_like_monologue(text: str) -> bool:
-    lower = text.lstrip('"\' ').lower()
-    return any(lower.startswith(p) for p in _MONOLOGUE_STARTS)
+    lower = text.lstrip('"\' ').strip().lower()
+    normalized = lower.rstrip(".!, ")
+    if any(lower.startswith(p) for p in _CONTROL_OUTPUT_STARTS):
+        return True
+    if normalized in _ACK_ONLY:
+        return True
+    if os.environ.get("BIOCLAW_SANITIZER_STRICT_MONOLOGUE", "").lower() in {"1", "true", "yes", "on"}:
+        return any(lower.startswith(p) for p in _LEGACY_MONOLOGUE_STARTS)
+    return False
 
 
 def _looks_like_spam(text: str) -> bool:
@@ -472,25 +423,25 @@ def test_balance_parenthesis():
     spam = balance_parentheses('send DO NOT RE-SEND OR SPAM!')
     assert spam == '()', f"got: {spam}"
 
-    # 12. Monologue: LLM internal reasoning gets dropped
-    mono = balance_parentheses('send I should query for disease connections explicitly:')
-    assert mono == '()', f"got: {mono}"
+    # 12. Legacy monologue filtering is opt-in; normal explanatory prose passes.
+    mono = balance_parentheses('send I should query the schema relationship explicitly:')
+    assert mono == '((send "I should query the schema relationship explicitly:"))', f"got: {mono}"
 
-    # 13. Orphan prose monologue: also dropped
+    # 13. Orphan prose is passed through; LLM answer quality belongs to the LLM.
     orphan_mono = balance_parentheses('Looking at the LAST_SKILL_USE_RESULTS, the query returned no rows.')
-    assert orphan_mono == '()', f"got: {orphan_mono}"
+    assert orphan_mono == '((send "Looking at the LAST_SKILL_USE_RESULTS, the query returned no rows."))', f"got: {orphan_mono}"
 
     # 14. Multiple auto-wrapped orphan prose: cap at one
     multi_orphan = balance_parentheses('First sentence.\nSecond sentence.\nThird sentence.')
     assert multi_orphan == '((send "First sentence."))', f"got: {multi_orphan}"
 
-    # 15. New monologue patterns — "The user's message is empty..." gets dropped
+    # 15. Natural explanation is no longer filtered by hardcoded phrases.
     msg = balance_parentheses('send The user\'s message is empty. According to the EMPTY TURN HANDLING section, I should output nothing.')
-    assert msg == '()', f"got: {msg}"
+    assert msg == '((send "The user\'s message is empty. According to the EMPTY TURN HANDLING section, I should output nothing."))', f"got: {msg}"
 
-    # 16. "For this turn at 21:13:45, there is no new peer request..." gets dropped
+    # 16. Natural status prose is preserved unless it is an explicit no-output marker.
     forthis = balance_parentheses('send For this turn at 21:13:45, there is no new peer request and the previous request has already been answered.')
-    assert forthis == '()', f"got: {forthis}"
+    assert forthis == '((send "For this turn at 21:13:45, there is no new peer request and the previous request has already been answered."))', f"got: {forthis}"
 
     # 17. "no output - waiting for ..." status comments get dropped
     noop = balance_parentheses('send no output - waiting for assistant reply on prior entity query')
@@ -504,9 +455,9 @@ def test_balance_parenthesis():
     noop3 = balance_parentheses('(no output)')
     assert noop3 == '()', f"got: {noop3}"
 
-    # 20. Meta-analysis prose from Minimax idle turns is dropped.
+    # 20. Meta-analysis prose is no longer filtered by hardcoded phrase starts.
     meta = balance_parentheses('send The user is asking me to analyze the situation and provide the correct output.')
-    assert meta == '()', f"got: {meta}"
+    assert meta == '((send "The user is asking me to analyze the situation and provide the correct output."))', f"got: {meta}"
 
     # 21. Staged-edge replies intentionally need a second approval instruction.
     staged = balance_parentheses(

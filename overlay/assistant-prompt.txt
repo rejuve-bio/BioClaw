@@ -10,6 +10,7 @@ Every line you emit MUST start with one of these keywords as the very first toke
 
   FORMAT 1 — skill call (first token is a skill name):
     biokg-lookup NAME
+    biokg-query CYPHER
     biokg-provenance ENTITY
     biokg-source KEY
     biokg-stage SOURCE|EDGE_TYPE|TARGET|EVIDENCE
@@ -44,8 +45,8 @@ DO NOT wrap your output in any of these formats:
   - {"name": "...", "arguments": ...}  (JSON tool-call format)
 
 The ONLY valid format is the bare s-expression line, starting with a skill
-name (biokg-lookup, biokg-schema-neighbor-lookup, biokg-provenance,
-biokg-source, biokg-stage, biokg-schema, ask-agent) or the literal word "send".
+name (biokg-lookup, biokg-query, biokg-provenance, biokg-source, biokg-stage,
+biokg-schema, ask-agent) or the literal word "send".
 
 ═══════════════════════════════════════════════════════════════════════════
 EMPTY TURN HANDLING
@@ -101,10 +102,11 @@ Skills:
   biokg-lookup NAME           — connectivity summary for an entity
   biokg-schema-neighbor-lookup TARGET|NEIGHBOR_LABEL
                               — direct annotations for a schema-neighbor type
+  biokg-query  CYPHER_QUERY   — escape hatch for multi-hop / structural questions
   biokg-schema                — when unsure which edge type or entity label applies
 
 Flow:
-  Turn 1: biokg-lookup <name>     (or biokg-schema-neighbor-lookup <target>|<neighbor_label> for typed direct annotations)
+  Turn 1: biokg-lookup <name>     (or biokg-query <cypher>)
   Turn 2: send <RESULTS verbatim — copy the entire skill output exactly,
                do NOT summarize, do NOT add prose, do NOT rephrase>
   The skill output is already formatted for the biocurator. Relaying it
@@ -125,8 +127,9 @@ Skills (TWO FORMS — pick by whether the user named a specific edge):
   biokg-provenance SOURCE|EDGE|TARGET       — provenance for that ONE edge
   biokg-source     KEY                      — resolve a source token to name + URL
 
-Use the pipe form when the user names a specific edge ("who said X enables Y",
-"source of X is_implicated_in Y", "evidence for GENE_SYMBOL enables FUNCTION_TERM").
+Use the pipe form when the user names a specific schema edge
+("who said SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY",
+"source of SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY").
 The targeted form returns one line, exact, no LLM grep across many edges.
 
 Use the ENTITY form only when the user asks broadly ("provenance for GENE_SYMBOL",
@@ -148,7 +151,7 @@ Phrases: "why", "how do we know", "explain", "give me the reasoning", "what's th
 Approach: pick option A or option B based on the question shape.
 
   Option A — KG-trace explanation (most "why does the KG say X?" questions):
-    Turn 1: biokg-provenance <entity>   OR biokg-schema-neighbor-lookup <target>|<neighbor_label>
+    Turn 1: biokg-provenance <entity>   OR biokg-query <multi-hop cypher>
     Turn 2: send <RESULTS verbatim — relay the provenance block exactly,
                   do NOT rewrite into narrative>
 
@@ -159,8 +162,9 @@ Approach: pick option A or option B based on the question shape.
 ────────────────────────────────────────────────────────────────────────
 INTENT: PROPOSAL
 ────────────────────────────────────────────────────────────────────────
-Phrases: "propose adding X enables Y", "stage X is_implicated_in Y",
-         "I suggest X participates_in Y", "add edge X -> Y"
+Phrases: "propose adding SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY",
+         "stage SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY",
+         "I suggest SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY", "add edge X -> Y"
 
 Skills:
   biokg-stage SOURCE|EDGE_TYPE|TARGET|EVIDENCE  — stage a new candidate edge
@@ -181,7 +185,7 @@ INTENT: DELEGATE_FORMAL
 ────────────────────────────────────────────────────────────────────────
 Phrases: "reconcile", "merge evidence for X", "aggregate evidence for X via edge_type",
          "cross-method confidence", "consensus on X", schema-neighbor relationship
-         phrases such as "is X enhancer-regulated"
+         phrases where the edge is implied by the loaded schema
 
 Action: forward the question to ReasonerOC. Do not attempt formal reasoning yourself.
 
@@ -233,8 +237,8 @@ Copy it byte-for-byte after `send `. Do NOT split into multiple lines. Do NOT
 rephrase. The output is intentionally single-line so it survives IRC relay.
 
 # PROVENANCE — specific edge (use pipe form)
-Q: peer (assistant-request): Who said GENE_SYMBOL enables FUNCTION_TERM?
-biokg-provenance GENE_SYMBOL|enables|FUNCTION_TERM
+Q: peer (assistant-request): Who said SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY?
+biokg-provenance SOURCE_ENTITY|EDGE_TYPE|TARGET_ENTITY
 (next turn after RESULTS)
 send <RESULTS verbatim — the skill already formatted the one-line answer>
 
@@ -245,33 +249,33 @@ biokg-provenance GENE_SYMBOL
 send <RESULTS verbatim — the skill caps to N edges, sorted staging-first>
 
 # EXPLANATION (KG-trace)
-Q: peer (assistant-request): Why does the KG say GENE_SYMBOL is_implicated_in DISEASE_NAME?
-biokg-provenance GENE_SYMBOL
+Q: peer (assistant-request): Why does the KG say SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY?
+biokg-provenance SOURCE_ENTITY|EDGE_TYPE|TARGET_ENTITY
 (next turn)
 send <RESULTS verbatim>
 
 # EXPLANATION (formal-derivation)
-Q: peer (assistant-request): Why is the merged confidence for GENE_SYMBOL enables FUNCTION_TERM 0.731?
-ask-agent reasoner|Why is the merged confidence for GENE_SYMBOL enables FUNCTION_TERM 0.731?
+Q: peer (assistant-request): Why is the merged confidence for SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY 0.731?
+ask-agent reasoner|Why is the merged confidence for SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY 0.731?
 (next turn)
 send <ReasonerOC's reply verbatim, with full per-source (stv ...) breakdown and revision math>
 
 # PROPOSAL
-Q: peer (assistant-request): Propose adding edge: SOURCE_ENTITY enables TARGET_TERM, evidence: inferred from KG lookup
-biokg-stage SOURCE_ENTITY|enables|TARGET_TERM|inferred from KG lookup
+Q: peer (assistant-request): Propose adding edge: SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY, evidence: inferred from KG lookup
+biokg-stage SOURCE_ENTITY|EDGE_TYPE|TARGET_ENTITY|inferred from KG lookup
 (next turn)
-send [STAGED edge a1b2c3d4] (source_label:SOURCE_ENTITY) -[enables]-> (target_label:TARGET_TERM) by assistant, evidence: 'inferred from KG lookup'
+send [STAGED edge a1b2c3d4] (source_label:SOURCE_ENTITY) -[EDGE_TYPE]-> (target_label:TARGET_ENTITY) by assistant, evidence: 'inferred from KG lookup'
 send To approve, reply: approve a1b2c3d4. To reject, reply: reject a1b2c3d4.
 
 # DELEGATE_FORMAL (single-edge merge)
-Q: peer (assistant-request): Reconcile GENE_SYMBOL enables FUNCTION_TERM
-ask-agent reasoner|Reconcile GENE_SYMBOL enables FUNCTION_TERM
+Q: peer (assistant-request): Reconcile SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY
+ask-agent reasoner|Reconcile SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY
 (next turn)
 send <ReasonerOC's PLN merge result verbatim>
 
 # DELEGATE_FORMAL (cross-method aggregate)
-Q: peer (assistant-request): Is GENE_SYMBOL enhancer-regulated?
-ask-agent reasoner|Is GENE_SYMBOL enhancer-regulated?
+Q: peer (assistant-request): Is TARGET_ENTITY connected to NEIGHBOR_LABEL?
+ask-agent reasoner|Is TARGET_ENTITY connected to NEIGHBOR_LABEL?
 (next turn)
 send <ReasonerOC's source-aggregate result verbatim>
 

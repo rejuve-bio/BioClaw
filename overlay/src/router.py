@@ -251,22 +251,12 @@ def _conductor_specialist_for(text: str) -> str:
         return "reasoner"
     if re.search(r"\b(?:confidence|confident|cross-source|cross method|consensus|aggregate)\b", q):
         return "reasoner"
-    if re.search(r"\b(?:evidence|sources?|support)\b", q) and re.search(
-        r"\b(?:enhancer|regulat|disease|phenotype|associated|association)\b", q
-    ):
-        return "reasoner"
     if re.search(r"\b(?:evidence|sources?|support|confidence|confident)\b", q) and re.search(
         r"\b(?:that|this|it)\b", q
     ):
         return "reasoner"
     if re.search(r"\b(?:where|source|provenance|citation|come from|comes from)\b", q):
         return "assistant"
-    if re.match(
-        r"^(?:is|are)\s+.+?\s+.+?[-\s]?(?:regulated|associated|linked|connected)$",
-        q,
-        flags=re.IGNORECASE,
-    ):
-        return "reasoner"
     return "assistant"
 
 
@@ -276,7 +266,6 @@ def _conductor_assistant_route_is_confident(text: str) -> bool:
         re.search(r"\b(?:where|source|provenance|citation|come from|comes from)\b", q)
         or q.startswith(("propose ", "propose adding edge", "stage "))
         or re.match(r"^(?:what\s+does|tell\s+me\s+about|what\s+is|show\s+me|summari[sz]e|can\s+you\s+summari[sz]e)\b", q)
-        or re.search(r"\b(?:molecular function|biological process|cellular component|pathway)\b", q)
     )
 
 
@@ -286,7 +275,7 @@ def _llm_conductor_specialist_for(text: str) -> str:
     system = """You route BioClaw user messages to one specialist.
 Return only JSON: {"specialist":"assistant"} or {"specialist":"reasoner"}.
 AssistantOC handles entity summaries, direct annotations, BioKG lookup, provenance/source questions for a specific edge, and staging/proposals.
-ReasonerOC handles evidence confidence, reconcile/merge, source aggregation, disease/enhancer/regulation association evidence, and hypothesis-style reasoning.
+ReasonerOC handles evidence confidence, reconcile/merge, source aggregation over schema relations, and hypothesis-style reasoning.
 Do not answer the biology question."""
     user = f"User message: {text}"
     data = _llm_json(system, user, max_tokens=80)
@@ -303,7 +292,7 @@ def _llm_specialist_intent(role: str, text: str) -> dict:
         tools = (
             "Allowed tools:\n"
             "- functional_summary: broad question about what an entity/gene is known to do. Fields: entity.\n"
-            "- schema_neighbor_lookup: direct annotations for a neighbor class. Fields: entity, neighbor.\n"
+            "- schema_neighbor_lookup: direct annotations for a schema neighbor class. Fields: entity, neighbor.\n"
             "- lookup: general entity lookup. Fields: entity.\n"
             "- provenance: source/provenance for a specific edge. Fields: source, edge, target.\n"
             "- stage: user proposes adding an edge. Fields: source, edge, target, evidence.\n"
@@ -312,7 +301,7 @@ def _llm_specialist_intent(role: str, text: str) -> dict:
         tools = (
             "Allowed tools:\n"
             "- evidence_merge: confidence/reconcile/merge evidence for a specific edge. Fields: source, edge, target.\n"
-            "- schema_neighbor_aggregate: aggregate evidence for an entity through a biological neighbor class such as enhancer, disease, molecular function, biological process, cellular component, pathway. Fields: entity, neighbor.\n"
+            "- schema_neighbor_aggregate: aggregate evidence for an entity through a schema neighbor class. Fields: entity, neighbor.\n"
             "- source_aggregate: aggregate evidence by explicit edge type, optionally through a neighbor class. Fields: entity, edge, optional neighbor.\n"
         )
     else:
@@ -321,9 +310,12 @@ def _llm_specialist_intent(role: str, text: str) -> dict:
 Translate messy natural-language biology questions into exactly one supported tool call.
 Return only compact JSON. Do not answer the question.
 Use entity symbols as written, but remove type words like "gene" before the symbol.
-Normalize edges to one of: enables, associated_with, involved_in, located_in, participates_in, transcribes_to, translates_to, is_implicated_in.
-Normalize neighbors to one of: enhancer, disease, molecular function, biological process, cellular component, pathway, transcript, protein.
+Use only the schema labels and edge aliases listed below.
+For neighbor, return one schema entity label or schema entity name from SCHEMA.
+For edge, return one schema edge label or alias from SCHEMA.
 If no allowed tool fits, return {{"tool":"none"}}.
+SCHEMA:
+{_schema_prompt_inventory()}
 {tools}"""
     user = f"User message: {text}"
     data = _llm_json(system, user, max_tokens=180)
@@ -343,6 +335,35 @@ If no allowed tool fits, return {{"tool":"none"}}.
 def _llm_routing_enabled() -> bool:
     value = os.environ.get("BIOCLAW_LLM_ROUTING", "true").strip().lower()
     return value not in {"0", "false", "no", "off"}
+
+
+def _schema_prompt_inventory() -> str:
+    try:
+        import biokg
+        opts = biokg.schema_intent_options()
+    except Exception as exc:
+        print(f"[BIOCLAW_ROUTER] schema inventory unavailable: {exc}", flush=True)
+        return "schema unavailable"
+    entities = opts.get("entities") or []
+    edges = opts.get("edges") or []
+    ent_text = ", ".join(
+        sorted(
+            f"{e.get('label')} ({e.get('schema_name')})"
+            for e in entities
+            if e.get("label")
+        )
+    )
+    edge_lines = []
+    for edge in edges:
+        label = edge.get("label")
+        aliases = ", ".join(a for a in (edge.get("aliases") or [])[:8] if a)
+        pairs = ", ".join(
+            f"{p.get('source')}->{p.get('target')}"
+            for p in edge.get("pairs", [])
+            if p.get("source") and p.get("target")
+        )
+        edge_lines.append(f"- {label}: {pairs}; aliases: {aliases}")
+    return "entities: " + ent_text + "\nedges:\n" + "\n".join(edge_lines)
 
 
 def _llm_json(system: str, user: str, max_tokens: int = 160) -> dict:
@@ -424,28 +445,6 @@ def _activity_summary_entity(text: str) -> str:
 
 
 def _schema_neighbor_lookup_request(text: str):
-    q = re.sub(r"\s+", " ", text).strip().rstrip("?.!")
-    patterns = (
-        (r"^what\s+molecular\s+functions?\s+does\s+(.+?)\s+enable$", "molecular function"),
-        (r"^(?:which|list|show)\s+molecular\s+functions?\s+(?:does\s+)?(.+?)\s+enable$", "molecular function"),
-        (r"^what\s+molecular\s+functions?\s+are\s+enabled\s+by\s+(.+)$", "molecular function"),
-        (r"^what\s+functions?\s+does\s+(.+?)\s+enable$", "molecular function"),
-        (r"^what\s+biological\s+process(?:es)?\s+is\s+(.+?)\s+involved\s+in$", "biological process"),
-        (r"^(?:which|list|show)\s+biological\s+process(?:es)?\s+is\s+(.+?)\s+involved\s+in$", "biological process"),
-        (r"^is\s+(.+?)\s+involved\s+in\s+biological\s+process(?:es)?$", "biological process"),
-        (r"^(?:which|what|list|show)\s+process(?:es)?\s+is\s+(.+?)\s+(?:connected|linked|associated)\s+to$", "biological process"),
-        (r"^(?:which|what|list|show)\s+process(?:es)?\s+is\s+(.+?)\s+(?:connected|linked|associated)\s+with$", "biological process"),
-        (r"^what\s+cellular\s+components?\s+is\s+(.+?)\s+located\s+in$", "cellular component"),
-        (r"^(?:which|list|show)\s+cellular\s+components?\s+is\s+(.+?)\s+located\s+in$", "cellular component"),
-        (r"^is\s+(.+?)\s+located\s+in\s+cellular\s+component(?:s)?$", "cellular component"),
-        (r"^what\s+pathways?\s+does\s+(.+?)\s+participate\s+in$", "pathway"),
-        (r"^what\s+diseases?\s+is\s+(.+?)\s+associated\s+with$", "disease"),
-        (r"^(?:which|list|show)\s+diseases?\s+is\s+(.+?)\s+associated\s+with$", "disease"),
-    )
-    for pattern, neighbor in patterns:
-        m = re.match(pattern, q, flags=re.IGNORECASE)
-        if m:
-            return [_normalize_entity_phrase(m.group(1).strip()), neighbor]
     return None
 
 
@@ -471,14 +470,7 @@ def _edge_question(text: str, prefixes: tuple):
         for pattern in provenance_patterns:
             m = re.match(pattern, q, flags=re.IGNORECASE)
             if m:
-                if len(m.groups()) == 2 and m.group(2):
-                    parsed = (
-                        _normalize_entity_phrase(m.group(2).strip()),
-                        "enables",
-                        _normalize_edge_target("enables", m.group(1).strip()),
-                    )
-                else:
-                    parsed = _parse_edge_phrase(m.group(1).strip())
+                parsed = _parse_edge_phrase(" ".join(g for g in m.groups() if g).strip())
                 if parsed:
                     return parsed
 
@@ -499,93 +491,85 @@ def _edge_question(text: str, prefixes: tuple):
 def _parse_edge_phrase(body: str):
     body = re.sub(r"\b(?:claim|assertion|statement|fact)\b", " ", str(body), flags=re.IGNORECASE)
     body = re.sub(r"\s+", " ", body).strip().rstrip("?.!")
-    patterns = (
-        r"^(.+?)\s+(enables?|enabled|enabling)\s+(.+)$",
-        r"^(.+?)\s+(associated_with|associated\s+with)\s+(.+)$",
-        r"^(.+?)\s+(involved_in|involved\s+in)\s+(.+)$",
-        r"^(.+?)\s+(located_in|located\s+in)\s+(.+)$",
-        r"^(.+?)\s+(participates_in|participates\s+in)\s+(.+)$",
-        r"^(.+?)\s+(.+?\bbinding)$",
-    )
-    for pattern in patterns:
-        m = re.match(pattern, body, flags=re.IGNORECASE)
-        if not m:
-            continue
-        groups = m.groups()
-        if len(groups) == 2:
-            source, target = groups
-            edge = "enables"
-        else:
-            source, edge, target = groups
-        edge = _normalize_edge_type(edge)
-        return _normalize_entity_phrase(source.strip()), edge, _normalize_edge_target(edge, target.strip())
+    for edge, aliases in _schema_edge_aliases_for_router():
+        for alias in aliases:
+            pattern = r"^(.+?)\s+" + re.escape(alias).replace(r"\ ", r"\s+") + r"\s+(.+)$"
+            m = re.match(pattern, body, flags=re.IGNORECASE)
+            if not m:
+                continue
+            source, target = m.groups()
+            return (
+                _normalize_entity_phrase(source.strip()),
+                edge,
+                _normalize_edge_target(edge, target.strip()),
+            )
     parts = body.split(maxsplit=2)
-    if len(parts) == 3 and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", parts[1]):
-        return _normalize_entity_phrase(parts[0]), _normalize_edge_type(parts[1]), _normalize_entity_phrase(parts[2])
+    if len(parts) == 3:
+        edge = _normalize_edge_type(parts[1])
+        if edge:
+            return _normalize_entity_phrase(parts[0]), edge, _normalize_edge_target(edge, parts[2])
     return None
 
 
+def _schema_edge_aliases_for_router() -> list:
+    try:
+        import biokg
+        opts = biokg.schema_intent_options()
+    except Exception:
+        opts = {"edges": []}
+    out = []
+    for edge in opts.get("edges") or []:
+        label = str(edge.get("label") or "").strip()
+        if not label:
+            continue
+        aliases = {
+            label,
+            label.replace("_", " "),
+            *(str(a).strip() for a in edge.get("aliases", []) if str(a).strip()),
+        }
+        out.append((label, sorted(aliases, key=lambda x: (-len(x), x))))
+    return out
+
+
 def _normalize_edge_type(edge: str) -> str:
-    key = re.sub(r"\s+", " ", str(edge).strip().lower())
-    aliases = {
-        "enable": "enables",
-        "enables": "enables",
-        "enabled": "enables",
-        "enabling": "enables",
-        "associated with": "associated_with",
-        "associated_with": "associated_with",
-        "involved in": "involved_in",
-        "involved_in": "involved_in",
-        "located in": "located_in",
-        "located_in": "located_in",
-        "participates in": "participates_in",
-        "participates_in": "participates_in",
-    }
-    return aliases.get(key, key.replace(" ", "_"))
+    text = re.sub(r"\s+", " ", str(edge).strip())
+    try:
+        import biokg
+        resolved = biokg.schema_canonical_edge(text)
+        if resolved:
+            return resolved
+    except Exception:
+        pass
+    return _schema_token_local(text)
 
 
 def _normalize_neighbor_label(neighbor: str) -> str:
-    key = re.sub(r"[_-]+", " ", str(neighbor or "").strip().lower())
-    key = re.sub(r"\s+", " ", key)
-    aliases = {
-        "mf": "molecular function",
-        "molecular functions": "molecular function",
-        "molecular function": "molecular function",
-        "bp": "biological process",
-        "process": "biological process",
-        "processes": "biological process",
-        "biological processes": "biological process",
-        "biological process": "biological process",
-        "cc": "cellular component",
-        "cellular components": "cellular component",
-        "cellular component": "cellular component",
-        "enhancers": "enhancer",
-        "enhancer": "enhancer",
-        "regulatory enhancer": "enhancer",
-        "regulatory elements": "enhancer",
-        "regulatory element": "enhancer",
-        "diseases": "disease",
-        "disease": "disease",
-        "phenotype": "disease",
-        "phenotypes": "disease",
-        "pathways": "pathway",
-        "pathway": "pathway",
-        "transcripts": "transcript",
-        "transcript": "transcript",
-        "proteins": "protein",
-        "protein": "protein",
-    }
-    return aliases.get(key, key.replace(" ", "_"))
+    text = re.sub(r"\s+", " ", str(neighbor or "").replace("_", " ").strip())
+    try:
+        import biokg
+        resolved = biokg.schema_resolve_neighbor_label(text)
+        if resolved:
+            return resolved
+    except Exception:
+        pass
+    return _schema_token_local(text)
 
 
 def _normalize_entity_phrase(entity: str) -> str:
     text = re.sub(r"\s+", " ", str(entity).strip().strip('"').strip("'")).strip()
-    text = re.sub(
-        r"^(?:the\s+)?(?:gene|protein|transcript|pathway|disease|enhancer)\s+",
-        "",
-        text,
-        flags=re.IGNORECASE,
-    )
+    labels = []
+    try:
+        import biokg
+        opts = biokg.schema_intent_options()
+        for item in opts.get("entities") or []:
+            for label_text in (item.get("label"), item.get("schema_name")):
+                if label_text:
+                    labels.append(str(label_text).replace("_", " "))
+    except Exception:
+        labels = []
+    if labels:
+        alternatives = "|".join(re.escape(v) for v in sorted(set(labels), key=len, reverse=True))
+        text = re.sub(rf"^(?:the\s+)?(?:{alternatives})\s+", "", text, flags=re.IGNORECASE)
     return text.strip()
 
 
@@ -598,12 +582,11 @@ def _intent_edge_values(intent: dict) -> tuple:
 
 def _normalize_edge_target(edge: str, target: str) -> str:
     text = _normalize_entity_phrase(str(target or "").replace("-", " "))
-    text = re.sub(r"\s+", " ", text).strip()
-    if edge == "enables":
-        m = re.match(r"^(zinc|copper|iron|calcium|magnesium|manganese|sodium|potassium)\s+binding$", text, flags=re.IGNORECASE)
-        if m:
-            return f"{m.group(1).lower()} ion binding"
-    return text
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _schema_token_local(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(value).strip().lower()).strip("_")
 
 
 def _source_aggregate_request(text: str):
@@ -635,40 +618,6 @@ def _source_aggregate_request(text: str):
             values.append(neighbor.strip())
         return "edge", values
 
-    m = re.match(
-        r"^(?:is|are)\s+(.+?)\s+([A-Za-z][A-Za-z0-9_\-\s]*?)[-\s]?(?:regulated|associated|linked|connected)$",
-        q,
-        flags=re.IGNORECASE,
-    )
-    if m:
-        target, neighbor = m.groups()
-        return "schema-neighbor", [target.strip(), neighbor.strip()]
-
-    m = re.match(
-        r"^(?:does|do)\s+(?:biokg\s+)?(?:have|show)\s+evidence\s+that\s+(.+?)\s+(?:may\s+be|might\s+be|is|are)?\s*([A-Za-z][A-Za-z0-9_\-\s]*?)[-\s]?(?:regulated|associated|linked|connected)$",
-        q,
-        flags=re.IGNORECASE,
-    )
-    if m:
-        target, neighbor = m.groups()
-        return "schema-neighbor", [target.strip(), neighbor.strip()]
-
-    m = re.match(
-        r"^(?:what|which)\s+evidence\s+sources?\s+support\s+(.+?)\s+([A-Za-z][A-Za-z0-9_\-\s]*?)\s+(?:association|evidence|support)$",
-        q,
-        flags=re.IGNORECASE,
-    )
-    if m:
-        target, neighbor = m.groups()
-        return "schema-neighbor", [target.strip(), neighbor.strip()]
-
-    m = re.match(
-        r"^(?:do\s+we\s+have|is\s+there)\s+(?:regulatory|enhancer)\s+evidence\s+for\s+(.+)$",
-        q,
-        flags=re.IGNORECASE,
-    )
-    if m:
-        return "schema-neighbor", [m.group(1).strip(), "enhancer"]
     return None
 
 

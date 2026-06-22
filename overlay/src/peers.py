@@ -136,13 +136,6 @@ def _source_aggregate_request(text: str):
         target, neighbor = m.groups()
         return "schema-neighbor", [target.strip(), neighbor.strip()]
 
-    m = re.match(
-        r"^(?:do\s+we\s+have|is\s+there)\s+(?:regulatory|enhancer)\s+evidence\s+for\s+(.+)$",
-        q,
-        flags=re.IGNORECASE,
-    )
-    if m:
-        return "schema-neighbor", [m.group(1).strip(), "enhancer"]
     return None
 
 
@@ -177,42 +170,52 @@ def _assistant_fast_path(query: str):
 def _parse_edge_phrase(body: str):
     body = re.sub(r"\b(?:claim|assertion|statement|fact)\b", " ", str(body), flags=re.IGNORECASE)
     body = re.sub(r"\s+", " ", body).strip().rstrip("?.!")
-    patterns = (
-        r"^(.+?)\s+(enables?|enabled|enabling)\s+(.+)$",
-        r"^(.+?)\s+(associated_with|associated\s+with)\s+(.+)$",
-        r"^(.+?)\s+(involved_in|involved\s+in)\s+(.+)$",
-        r"^(.+?)\s+(located_in|located\s+in)\s+(.+)$",
-        r"^(.+?)\s+(participates_in|participates\s+in)\s+(.+)$",
-    )
-    for pattern in patterns:
-        m = re.match(pattern, body, flags=re.IGNORECASE)
-        if not m:
-            continue
-        source, edge, target = m.groups()
-        return source.strip(), _normalize_edge_type(edge), target.strip()
+    for edge, aliases in _schema_edge_aliases_for_router():
+        for alias in aliases:
+            pattern = r"^(.+?)\s+" + re.escape(alias).replace(r"\ ", r"\s+") + r"\s+(.+)$"
+            m = re.match(pattern, body, flags=re.IGNORECASE)
+            if not m:
+                continue
+            source, target = m.groups()
+            return source.strip(), edge, target.strip()
     parts = body.split(maxsplit=2)
-    if len(parts) == 3 and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", parts[1]):
-        return parts[0], _normalize_edge_type(parts[1]), parts[2]
+    if len(parts) == 3:
+        edge = _normalize_edge_type(parts[1])
+        if edge:
+            return parts[0], edge, parts[2]
     return None
 
 
+def _schema_edge_aliases_for_router() -> list:
+    try:
+        import biokg
+        opts = biokg.schema_intent_options()
+    except Exception:
+        opts = {"edges": []}
+    out = []
+    for edge in opts.get("edges") or []:
+        label = str(edge.get("label") or "").strip()
+        if not label:
+            continue
+        aliases = {
+            label,
+            label.replace("_", " "),
+            *(str(a).strip() for a in edge.get("aliases", []) if str(a).strip()),
+        }
+        out.append((label, sorted(aliases, key=lambda x: (-len(x), x))))
+    return out
+
+
 def _normalize_edge_type(edge: str) -> str:
-    key = re.sub(r"\s+", " ", str(edge).strip().lower())
-    aliases = {
-        "enable": "enables",
-        "enables": "enables",
-        "enabled": "enables",
-        "enabling": "enables",
-        "associated with": "associated_with",
-        "associated_with": "associated_with",
-        "involved in": "involved_in",
-        "involved_in": "involved_in",
-        "located in": "located_in",
-        "located_in": "located_in",
-        "participates in": "participates_in",
-        "participates_in": "participates_in",
-    }
-    return aliases.get(key, key.replace(" ", "_"))
+    text = re.sub(r"\s+", " ", str(edge).strip())
+    try:
+        import biokg
+        resolved = biokg.schema_canonical_edge(text)
+        if resolved:
+            return resolved
+    except Exception:
+        pass
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
 
 
 def _extract_lookup_entity(q_norm: str, pattern: str, lower_entity: str) -> str:

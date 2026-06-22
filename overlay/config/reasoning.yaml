@@ -1,0 +1,28 @@
+# BioClaw reasoning configuration.
+#
+# Default policy is intentionally neutral:
+#   1. Use edge-level confidence or normalized score when the KG provides it.
+#   2. Otherwise use default_stv.
+#
+# Do not encode test-graph relationships or source-specific assumptions here.
+# Large KG deployments can mount a separate calibrated reasoning file if they
+# have validated source/evidence reliability priors.
+
+default_stv: [1.0, 0.5]
+action_threshold: 0.5
+
+# Optional deployment-calibrated maps. Empty by default so BioClaw does not
+# silently assign arbitrary reliability to sources or evidence codes.
+evidence_code_stv: {}
+source_stv: {}
+score_normalization: {}
+
+# Annotation/property names to inspect on each edge atom before falling back to
+# default_stv. These are not confidence values; the values must come from the KG.
+edge_confidence_annotations:
+  - confidence
+  - edge_confidence
+  - staging_confidence
+edge_score_annotations:
+  - score
+  - edge_score
