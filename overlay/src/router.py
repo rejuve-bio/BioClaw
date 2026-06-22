@@ -90,6 +90,10 @@ def route_specialist_message(role: str, msg: str) -> str:
             tool = f"biokg.lookup({entity})"
             return _specialist_send(role, tool, text, biokg.lookup(entity))
 
+        llm_routed = _execute_llm_specialist_intent(role, text)
+        if llm_routed:
+            return llm_routed
+
         edge = _edge_question(
             text,
             prefixes=(
@@ -118,11 +122,11 @@ def route_specialist_message(role: str, msg: str) -> str:
             tool = f"biokg.stage_pipe({'|'.join(staged)})"
             return _specialist_send(role, tool, text, result, interpret=False)
 
+    if role == "reasoner":
         llm_routed = _execute_llm_specialist_intent(role, text)
         if llm_routed:
             return llm_routed
 
-    if role == "reasoner":
         edge = _edge_question(
             text,
             prefixes=(
@@ -151,10 +155,6 @@ def route_specialist_message(role: str, msg: str) -> str:
                 return _specialist_send(role, tool, text, biokg.pln_schema_neighbor_aggregate_pipe(payload))
             tool = f"biokg.pln_source_aggregate_pipe({payload})"
             return _specialist_send(role, tool, text, biokg.pln_source_aggregate_pipe(payload))
-
-        llm_routed = _execute_llm_specialist_intent(role, text)
-        if llm_routed:
-            return llm_routed
 
     return ""
 
@@ -265,7 +265,7 @@ def _conductor_assistant_route_is_confident(text: str) -> bool:
     return bool(
         re.search(r"\b(?:where|source|provenance|citation|come from|comes from)\b", q)
         or q.startswith(("propose ", "propose adding edge", "stage "))
-        or re.match(r"^(?:what\s+does|tell\s+me\s+about|what\s+is|show\s+me|summari[sz]e|can\s+you\s+summari[sz]e)\b", q)
+        or re.match(r"^(?:what\s+does|what\s+do\s+we\s+know\s+about|tell\s+me\s+about|what\s+is|show\s+me|summari[sz]e|can\s+you\s+summari[sz]e)\b", q)
     )
 
 
@@ -291,7 +291,7 @@ def _llm_specialist_intent(role: str, text: str) -> dict:
     if role == "assistant":
         tools = (
             "Allowed tools:\n"
-            "- functional_summary: broad question about what an entity/gene is known to do. Fields: entity.\n"
+            "- functional_summary: broad question about what an entity is known to do, including phrases like what do we know about ENTITY biologically. Fields: entity.\n"
             "- schema_neighbor_lookup: direct annotations for a schema neighbor class. Fields: entity, neighbor.\n"
             "- lookup: general entity lookup. Fields: entity.\n"
             "- provenance: source/provenance for a specific edge. Fields: source, edge, target.\n"
@@ -300,7 +300,7 @@ def _llm_specialist_intent(role: str, text: str) -> dict:
     elif role == "reasoner":
         tools = (
             "Allowed tools:\n"
-            "- evidence_merge: confidence/reconcile/merge evidence for a specific edge. Fields: source, edge, target.\n"
+            "- evidence_merge: confidence/reconcile/merge evidence for a specific edge, including shortened target terms if the KG can resolve them. Fields: source, edge, target.\n"
             "- schema_neighbor_aggregate: aggregate evidence for an entity through a schema neighbor class. Fields: entity, neighbor.\n"
             "- source_aggregate: aggregate evidence by explicit edge type, optionally through a neighbor class. Fields: entity, edge, optional neighbor.\n"
         )
@@ -313,6 +313,9 @@ Use entity symbols as written, but remove type words like "gene" before the symb
 Use only the schema labels and edge aliases listed below.
 For neighbor, return one schema entity label or schema entity name from SCHEMA.
 For edge, return one schema edge label or alias from SCHEMA.
+If the user names a source entity and a target concept but omits the edge word,
+choose an edge only when SCHEMA has a source->target-label contract that fits
+the concept's entity type; otherwise return {{"tool":"none"}}.
 If no allowed tool fits, return {{"tool":"none"}}.
 SCHEMA:
 {_schema_prompt_inventory()}
@@ -430,6 +433,7 @@ def _activity_summary_entity(text: str) -> str:
     q = re.sub(r"\s+", " ", text).strip().rstrip("?.!")
     patterns = (
         r"^what\s+does\s+(.+?)\s+do$",
+        r"^what\s+do\s+we\s+know\s+about\s+(.+?)(?:\s+biologically)?$",
         r"^(?:can\s+you\s+)?summari[sz]e\s+what\s+(.+?)\s+is\s+known\s+to\s+do$",
         r"^what\s+is\s+(.+?)\s+known\s+to\s+do$",
         r"^(?:can\s+you\s+)?summari[sz]e\s+(.+?)$",
@@ -540,7 +544,7 @@ def _normalize_edge_type(edge: str) -> str:
             return resolved
     except Exception:
         pass
-    return _schema_token_local(text)
+    return ""
 
 
 def _normalize_neighbor_label(neighbor: str) -> str:

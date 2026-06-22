@@ -822,6 +822,20 @@ def _schema_edge_canonical(schema: Optional[Schema], edge_label: str) -> str:
     return raw
 
 
+def _schema_oriented_target_labels(schema: Optional[Schema], source_label: str,
+                                   edge_label: str) -> set:
+    if schema is None:
+        return set()
+    edge = schema.edges.get(edge_label)
+    if not edge:
+        return set()
+    labels = set()
+    for src, tgt in edge.get("pairs", []):
+        if src == source_label:
+            labels.add(tgt)
+    return labels
+
+
 def _schema_neighbor_contract(schema: Optional[Schema], target_label: str,
                               neighbor_label: str):
     resolved_neighbor = _schema_label_for_phrase(schema, neighbor_label)
@@ -2297,6 +2311,54 @@ class MorkBackend:
                     return r
         return None
 
+    def _resolve_edge_target_name(self, source_label: str, source_id: str,
+                                  edge_type: str, target_name: str):
+        """Resolve a target by exact name, then by actual schema-edge neighbors.
+
+        This lets natural shortened terms map to an existing connected target
+        without encoding domain-specific synonyms in Python. The fuzzy pass is
+        constrained to targets reached from this source through this schema edge.
+        """
+        exact = self._resolve_name(target_name)
+        if exact:
+            return exact
+
+        safe_edge_type = _schema_edge_canonical(self._schema, edge_type)
+        wanted = _text_tokens(target_name)
+        if not wanted:
+            return None
+
+        allowed_labels = _schema_oriented_target_labels(self._schema, source_label, safe_edge_type)
+        tag = f"bioclaw_resolve_target_{uuid.uuid4().hex[:8]}"
+        raw = self._transform(
+            patterns=[f"({safe_edge_type} ({source_label} {source_id}) ($t_label $t_id))"],
+            template=f"({tag} $t_label $t_id)",
+        )
+        candidates = []
+        for line in raw:
+            s = line.strip()
+            if not (s.startswith("(") and s.endswith(")")):
+                continue
+            inner = s[1:-1].strip()
+            if not inner.startswith(tag):
+                continue
+            parts = inner[len(tag):].strip().split()
+            if len(parts) < 2:
+                continue
+            t_label, t_id = parts[0], " ".join(parts[1:])
+            if allowed_labels and t_label not in allowed_labels:
+                continue
+            display = (self._resolve_id_to_name(t_label, t_id) or t_id).replace("_", " ")
+            score = _term_match_score(wanted, display)
+            if score <= 0:
+                continue
+            candidates.append((score, len(display), t_label, t_id))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (-item[0], item[1], item[2], item[3]))
+        best = candidates[0]
+        return best[2], best[3]
+
     def _candidate_labels(self):
         """Best-effort list of node labels for fallback ID matching."""
         if self._schema is not None and getattr(self._schema, "nodes", None):
@@ -2564,7 +2626,7 @@ class MorkBackend:
                     f"(tried properties: {', '.join(self._name_props)}).")
         s_label, s_id = src
 
-        tgt = self._resolve_name(target_name)
+        tgt = self._resolve_edge_target_name(s_label, s_id, safe_edge_type, target_name)
         if not tgt:
             return (f"error: target entity {target_name!r} not found in BioKG "
                     f"(tried properties: {', '.join(self._name_props)}).")
@@ -2920,7 +2982,7 @@ class MorkBackend:
         if not safe_edge_type:
             return f"error: invalid edge_type {edge_type!r}"
 
-        tgt = self._resolve_name(target_name)
+        tgt = self._resolve_edge_target_name(s_label, s_id, safe_edge_type, target_name)
         if not tgt:
             return (f"error: target entity {target_name!r} not found in BioKG "
                     f"(tried properties: {', '.join(self._name_props)}).")
@@ -3111,7 +3173,7 @@ class MorkBackend:
                     f"(tried properties: {', '.join(self._name_props)}).")
         s_label, s_id = src_entity
 
-        tgt_entity = self._resolve_name(target_name)
+        tgt_entity = self._resolve_edge_target_name(s_label, s_id, safe_edge_type, target_name)
         if not tgt_entity:
             return (f"error: target entity {target_name!r} not found in BioKG "
                     f"(tried properties: {', '.join(self._name_props)}).")
@@ -3607,6 +3669,26 @@ def _pick(d: dict, keys: list, default: Any = None):
         if k in d and d[k] not in (None, ""):
             return d[k]
     return default
+
+
+def _text_tokens(value: Any) -> set:
+    words = re.findall(r"[a-z0-9]+", str(value or "").lower())
+    return {w for w in words if len(w) > 1}
+
+
+def _term_match_score(wanted_tokens: set, candidate: str) -> float:
+    candidate_tokens = _text_tokens(candidate)
+    if not wanted_tokens or not candidate_tokens:
+        return 0.0
+    overlap = wanted_tokens & candidate_tokens
+    if not overlap:
+        return 0.0
+    # Prefer candidates that cover the user's phrase, then concise labels.
+    recall = len(overlap) / len(wanted_tokens)
+    precision = len(overlap) / len(candidate_tokens)
+    if recall < 1.0:
+        return 0.0
+    return recall + precision
 
 
 def _short(value: Any, limit: int = 80) -> str:
