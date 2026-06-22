@@ -210,7 +210,7 @@ def _lookup_entity(text: str) -> str:
     for pattern, group in patterns:
         m = re.match(pattern, q, flags=re.IGNORECASE)
         if m:
-            return m.group(group).strip()
+            return _normalize_entity_phrase(m.group(group).strip())
     return ""
 
 
@@ -221,11 +221,12 @@ def _activity_summary_entity(text: str) -> str:
         r"^(?:can\s+you\s+)?summari[sz]e\s+what\s+(.+?)\s+is\s+known\s+to\s+do$",
         r"^what\s+is\s+(.+?)\s+known\s+to\s+do$",
         r"^(?:can\s+you\s+)?summari[sz]e\s+(.+?)$",
+        r"^(?:i'?m|i\s+am)\s+asking\s+about\s+(?:the\s+)?(.+)$",
     )
     for pattern in patterns:
         m = re.match(pattern, q, flags=re.IGNORECASE)
         if m:
-            entity = m.group(1).strip()
+            entity = _normalize_entity_phrase(m.group(1).strip())
             if entity.lower() not in {"it", "that", "this"}:
                 return entity
     return ""
@@ -251,7 +252,7 @@ def _schema_neighbor_lookup_request(text: str):
     for pattern, neighbor in patterns:
         m = re.match(pattern, q, flags=re.IGNORECASE)
         if m:
-            return [m.group(1).strip(), neighbor]
+            return [_normalize_entity_phrase(m.group(1).strip()), neighbor]
     return None
 
 
@@ -309,10 +310,10 @@ def _parse_edge_phrase(body: str):
         if not m:
             continue
         source, edge, target = m.groups()
-        return source.strip(), _normalize_edge_type(edge), target.strip()
+        return _normalize_entity_phrase(source.strip()), _normalize_edge_type(edge), _normalize_entity_phrase(target.strip())
     parts = body.split(maxsplit=2)
     if len(parts) == 3 and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", parts[1]):
-        return parts[0], _normalize_edge_type(parts[1]), parts[2]
+        return _normalize_entity_phrase(parts[0]), _normalize_edge_type(parts[1]), _normalize_entity_phrase(parts[2])
     return None
 
 
@@ -333,6 +334,17 @@ def _normalize_edge_type(edge: str) -> str:
         "participates_in": "participates_in",
     }
     return aliases.get(key, key.replace(" ", "_"))
+
+
+def _normalize_entity_phrase(entity: str) -> str:
+    text = re.sub(r"\s+", " ", str(entity).strip().strip('"').strip("'")).strip()
+    text = re.sub(
+        r"^(?:the\s+)?(?:gene|protein|transcript|pathway|disease|enhancer)\s+",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text.strip()
 
 
 def _source_aggregate_request(text: str):

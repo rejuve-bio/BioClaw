@@ -452,7 +452,7 @@ def schema_neighbor_lookup_pipe(combined: str) -> str:
 
 def functional_summary(name: str) -> str:
     """Compact schema-derived gene activity summary for broad 'what does X do?' questions."""
-    target = str(name).strip().strip('"').strip("'").strip()
+    target = _normalize_entity_query_name(name)
     if not target:
         return "error: biokg-functional-summary requires a non-empty name"
     backend = _get_backend()
@@ -474,6 +474,18 @@ def functional_summary(name: str) -> str:
     if segments:
         return " ".join(segments[:4])
     return lookup(target)
+
+
+def _normalize_entity_query_name(name: str) -> str:
+    text = str(name).strip().strip('"').strip("'").strip()
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(
+        r"^(?:the\s+)?(?:gene|protein|transcript|pathway|disease|enhancer)\s+",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text.strip()
 
 
 # ─── BioCypher schema loader ────────────────────────────────────────────────
@@ -2130,6 +2142,7 @@ class MorkBackend:
         The metta_writer normalizes spaces → underscores in name values, so we
         try the input as-is AND with that normalization applied.
         Falls back to treating the input as a raw ID if no name match works."""
+        name = _normalize_entity_query_name(name)
         candidates = [name]
         normalized = name.replace(" ", "_")
         if normalized != name:

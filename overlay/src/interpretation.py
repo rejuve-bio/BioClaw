@@ -163,6 +163,7 @@ def _grounded_rewrite_prompt(role: str, tool_call: str, user_text: str, raw: str
 Your job is to make grounded BioKG/PLN tool output readable for biologists.
 Use only the supplied grounded facts. Do not add outside biology, mechanisms, literature, citations, or assumptions.
 Preserve source names, edge counts, evidence codes, stv values, and caveats.
+Preserve entity type exactly. If the raw result is about a gene, do not call the entity a protein; say "gene" or just use the entity symbol.
 If no support was found, say this KG snapshot did not return support; do not imply biology disproves it.
 Return normal English prose only. Do not return MeTTa, Lisp, JSON, XML, tool calls, bullets by default, or placeholders like (), nil, null, or N/A.
 Keep the answer short enough for IRC, ideally 2-4 sentences."""
