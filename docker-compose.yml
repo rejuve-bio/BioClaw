@@ -87,6 +87,18 @@ services:
       # callProvider — runtime git-import was the only thing restoring it,
       # and that path is unreliable. Track the working copy here.)
       - ./overlay/lib_llm_ext.py:/PeTTa/repos/OmegaClaw-Core/lib_llm_ext.py:ro
+      - ./overlay/channels/internal_rpc.py:/PeTTa/repos/OmegaClaw-Core/channels/internal_rpc.py:ro
+      - ./overlay/channels/irc.py:/PeTTa/repos/OmegaClaw-Core/channels/irc.py:ro
+      - ./overlay/src/biokg.py:/PeTTa/repos/OmegaClaw-Core/src/biokg.py:ro
+      - ./overlay/src/channels.metta:/PeTTa/repos/OmegaClaw-Core/src/channels.metta:ro
+      - ./overlay/src/helper.py:/PeTTa/repos/OmegaClaw-Core/src/helper.py:ro
+      - ./overlay/src/interpretation.py:/PeTTa/repos/OmegaClaw-Core/src/interpretation.py:ro
+      - ./overlay/src/peers.py:/PeTTa/repos/OmegaClaw-Core/src/peers.py:ro
+      - ./overlay/src/router.py:/PeTTa/repos/OmegaClaw-Core/src/router.py:ro
+      - ./overlay/src/skills.metta:/PeTTa/repos/OmegaClaw-Core/src/skills.metta:ro
+      - ./overlay/assistant-prompt.txt:/opt/bioclaw/assistant-prompt.txt:ro
+      - ./overlay/conductor-prompt.txt:/opt/bioclaw/conductor-prompt.txt:ro
+      - ./overlay/reasoner-prompt.txt:/opt/bioclaw/reasoner-prompt.txt:ro
       # Patched main loop: rephrases the spam-shield directive so weaker LLMs
       # stop verbally acknowledging it instead of relaying RESULTS.
       - ./overlay/core/loop.metta:/PeTTa/repos/OmegaClaw-Core/src/loop.metta:ro
@@ -122,6 +134,18 @@ services:
       - "RPC_PORT=8080"
     volumes:
       - ./overlay/lib_llm_ext.py:/PeTTa/repos/OmegaClaw-Core/lib_llm_ext.py:ro
+      - ./overlay/channels/internal_rpc.py:/PeTTa/repos/OmegaClaw-Core/channels/internal_rpc.py:ro
+      - ./overlay/channels/irc.py:/PeTTa/repos/OmegaClaw-Core/channels/irc.py:ro
+      - ./overlay/src/biokg.py:/PeTTa/repos/OmegaClaw-Core/src/biokg.py:ro
+      - ./overlay/src/channels.metta:/PeTTa/repos/OmegaClaw-Core/src/channels.metta:ro
+      - ./overlay/src/helper.py:/PeTTa/repos/OmegaClaw-Core/src/helper.py:ro
+      - ./overlay/src/interpretation.py:/PeTTa/repos/OmegaClaw-Core/src/interpretation.py:ro
+      - ./overlay/src/peers.py:/PeTTa/repos/OmegaClaw-Core/src/peers.py:ro
+      - ./overlay/src/router.py:/PeTTa/repos/OmegaClaw-Core/src/router.py:ro
+      - ./overlay/src/skills.metta:/PeTTa/repos/OmegaClaw-Core/src/skills.metta:ro
+      - ./overlay/assistant-prompt.txt:/opt/bioclaw/assistant-prompt.txt:ro
+      - ./overlay/conductor-prompt.txt:/opt/bioclaw/conductor-prompt.txt:ro
+      - ./overlay/reasoner-prompt.txt:/opt/bioclaw/reasoner-prompt.txt:ro
       - ./overlay/core/loop.metta:/PeTTa/repos/OmegaClaw-Core/src/loop.metta:ro
       - assistant-memory:/PeTTa/repos/OmegaClaw-Core/memory
     tmpfs:
@@ -154,6 +178,18 @@ services:
       - "RPC_PORT=8080"
     volumes:
       - ./overlay/lib_llm_ext.py:/PeTTa/repos/OmegaClaw-Core/lib_llm_ext.py:ro
+      - ./overlay/channels/internal_rpc.py:/PeTTa/repos/OmegaClaw-Core/channels/internal_rpc.py:ro
+      - ./overlay/channels/irc.py:/PeTTa/repos/OmegaClaw-Core/channels/irc.py:ro
+      - ./overlay/src/biokg.py:/PeTTa/repos/OmegaClaw-Core/src/biokg.py:ro
+      - ./overlay/src/channels.metta:/PeTTa/repos/OmegaClaw-Core/src/channels.metta:ro
+      - ./overlay/src/helper.py:/PeTTa/repos/OmegaClaw-Core/src/helper.py:ro
+      - ./overlay/src/interpretation.py:/PeTTa/repos/OmegaClaw-Core/src/interpretation.py:ro
+      - ./overlay/src/peers.py:/PeTTa/repos/OmegaClaw-Core/src/peers.py:ro
+      - ./overlay/src/router.py:/PeTTa/repos/OmegaClaw-Core/src/router.py:ro
+      - ./overlay/src/skills.metta:/PeTTa/repos/OmegaClaw-Core/src/skills.metta:ro
+      - ./overlay/assistant-prompt.txt:/opt/bioclaw/assistant-prompt.txt:ro
+      - ./overlay/conductor-prompt.txt:/opt/bioclaw/conductor-prompt.txt:ro
+      - ./overlay/reasoner-prompt.txt:/opt/bioclaw/reasoner-prompt.txt:ro
       - ./overlay/core/loop.metta:/PeTTa/repos/OmegaClaw-Core/src/loop.metta:ro
       - reasoner-memory:/PeTTa/repos/OmegaClaw-Core/memory
     tmpfs:

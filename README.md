@@ -375,13 +375,16 @@ docker compose down -v                # stop + wipe memory for a fresh state
 docker compose build --no-cache       # force rebuild
 ```
 
-After any code change in `overlay/src/`:
+Most BioClaw overlay files are bind-mounted into the containers, so after a
+normal code change in `overlay/src/`, `overlay/channels/`, prompts, or
+`overlay/lib_llm_ext.py`:
 
 ```bash
-docker compose build conductor assistant-oc reasoner-oc
-docker compose down -v
-docker compose up -d
+docker compose up -d --force-recreate conductor assistant-oc reasoner-oc
 ```
+
+Use a Docker rebuild only when the `Dockerfile` or image-level dependencies
+change.
 
 ## Phase 2 — what's next
 
