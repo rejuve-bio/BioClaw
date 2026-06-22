@@ -132,6 +132,7 @@ def route_specialist_message(role: str, msg: str) -> str:
                 "confidence for ",
                 "confidence on ",
                 "how strong is the evidence for ",
+                "how strong is the support for ",
             ),
         )
         if edge:
@@ -432,6 +433,8 @@ def _schema_neighbor_lookup_request(text: str):
         (r"^what\s+biological\s+process(?:es)?\s+is\s+(.+?)\s+involved\s+in$", "biological process"),
         (r"^(?:which|list|show)\s+biological\s+process(?:es)?\s+is\s+(.+?)\s+involved\s+in$", "biological process"),
         (r"^is\s+(.+?)\s+involved\s+in\s+biological\s+process(?:es)?$", "biological process"),
+        (r"^(?:which|what|list|show)\s+process(?:es)?\s+is\s+(.+?)\s+(?:connected|linked|associated)\s+to$", "biological process"),
+        (r"^(?:which|what|list|show)\s+process(?:es)?\s+is\s+(.+?)\s+(?:connected|linked|associated)\s+with$", "biological process"),
         (r"^what\s+cellular\s+components?\s+is\s+(.+?)\s+located\s+in$", "cellular component"),
         (r"^(?:which|list|show)\s+cellular\s+components?\s+is\s+(.+?)\s+located\s+in$", "cellular component"),
         (r"^is\s+(.+?)\s+located\s+in\s+cellular\s+component(?:s)?$", "cellular component"),
@@ -461,21 +464,29 @@ def _edge_question(text: str, prefixes: tuple):
 
     provenance_patterns = (
         r"^(?:where\s+does|where\s+did)\s+(?:the\s+)?(.+?)\s+(?:claim|assertion|statement|fact)\s+come\s+from$",
+        r"^(?:where\s+does|where\s+did)\s+(?:the\s+)?(.+?)\s+(?:claim|assertion|statement|fact)\s+for\s+(.+?)\s+come\s+from$",
         r"^(?:what|which)\s+sources?\s+support\s+(.+)$",
     )
     if any(prefix in {"where does ", "where did ", "what sources support ", "which sources support "} for prefix in prefixes):
         for pattern in provenance_patterns:
             m = re.match(pattern, q, flags=re.IGNORECASE)
             if m:
-                parsed = _parse_edge_phrase(m.group(1).strip())
+                if len(m.groups()) == 2 and m.group(2):
+                    parsed = (
+                        _normalize_entity_phrase(m.group(2).strip()),
+                        "enables",
+                        _normalize_edge_target("enables", m.group(1).strip()),
+                    )
+                else:
+                    parsed = _parse_edge_phrase(m.group(1).strip())
                 if parsed:
                     return parsed
 
     confidence_patterns = (
         r"^(?:how\s+confident\s+are\s+we\s+about|confidence\s+for|confidence\s+on)\s+(.+)$",
-        r"^(?:how\s+strong\s+is\s+the\s+evidence\s+for)\s+(.+)$",
+        r"^(?:how\s+strong\s+is\s+the\s+(?:evidence|support)\s+for)\s+(.+)$",
     )
-    if any("confident" in prefix or "confidence" in prefix for prefix in prefixes):
+    if any("confident" in prefix or "confidence" in prefix or "how strong" in prefix for prefix in prefixes):
         for pattern in confidence_patterns:
             m = re.match(pattern, q, flags=re.IGNORECASE)
             if m:
@@ -494,13 +505,20 @@ def _parse_edge_phrase(body: str):
         r"^(.+?)\s+(involved_in|involved\s+in)\s+(.+)$",
         r"^(.+?)\s+(located_in|located\s+in)\s+(.+)$",
         r"^(.+?)\s+(participates_in|participates\s+in)\s+(.+)$",
+        r"^(.+?)\s+(.+?\bbinding)$",
     )
     for pattern in patterns:
         m = re.match(pattern, body, flags=re.IGNORECASE)
         if not m:
             continue
-        source, edge, target = m.groups()
-        return _normalize_entity_phrase(source.strip()), _normalize_edge_type(edge), _normalize_entity_phrase(target.strip())
+        groups = m.groups()
+        if len(groups) == 2:
+            source, target = groups
+            edge = "enables"
+        else:
+            source, edge, target = groups
+        edge = _normalize_edge_type(edge)
+        return _normalize_entity_phrase(source.strip()), edge, _normalize_edge_target(edge, target.strip())
     parts = body.split(maxsplit=2)
     if len(parts) == 3 and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", parts[1]):
         return _normalize_entity_phrase(parts[0]), _normalize_edge_type(parts[1]), _normalize_entity_phrase(parts[2])
@@ -534,6 +552,8 @@ def _normalize_neighbor_label(neighbor: str) -> str:
         "molecular functions": "molecular function",
         "molecular function": "molecular function",
         "bp": "biological process",
+        "process": "biological process",
+        "processes": "biological process",
         "biological processes": "biological process",
         "biological process": "biological process",
         "cc": "cellular component",
@@ -572,8 +592,18 @@ def _normalize_entity_phrase(entity: str) -> str:
 def _intent_edge_values(intent: dict) -> tuple:
     source = _normalize_entity_phrase(intent.get("source", ""))
     edge = _normalize_edge_type(intent.get("edge", ""))
-    target = _normalize_entity_phrase(intent.get("target", ""))
+    target = _normalize_edge_target(edge, intent.get("target", ""))
     return source, edge, target
+
+
+def _normalize_edge_target(edge: str, target: str) -> str:
+    text = _normalize_entity_phrase(str(target or "").replace("-", " "))
+    text = re.sub(r"\s+", " ", text).strip()
+    if edge == "enables":
+        m = re.match(r"^(zinc|copper|iron|calcium|magnesium|manganese|sodium|potassium)\s+binding$", text, flags=re.IGNORECASE)
+        if m:
+            return f"{m.group(1).lower()} ion binding"
+    return text
 
 
 def _source_aggregate_request(text: str):
