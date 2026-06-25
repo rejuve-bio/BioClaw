@@ -5,8 +5,8 @@
 # prompt when SPECIALIST_MODE=true.
 FROM singularitynet/omegaclaw:hackathon2604
 
-# Phase 2A: Neo4j driver for the biokg backend.
-# Phase 3: PyYAML for parsing the BioCypher schema config.
+# Neo4j driver remains available for optional legacy deployments.
+# PyYAML parses BioCypher schema/reasoning/data-source config.
 # The upstream runtime image lacks pip (multistage build), so install it first.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends python3-pip \
@@ -16,7 +16,7 @@ RUN apt-get update \
 # Drop our overlay onto the existing source tree. Files included:
 #   channels/internal_rpc.py    — new channel adapter
 #   src/peers.py                — Conductor-side HTTP client
-#   src/biokg.py                — backend-agnostic KG access (Neo4j today, MORK later)
+#   src/biokg.py                — backend-agnostic KG access (MORK today, Neo4j optional)
 #   src/channels.metta          — patched: dispatch knows about internal-rpc
 #   src/skills.metta            — patched: registers ask-agent + biokg-* skills
 COPY overlay/channels/    /PeTTa/repos/OmegaClaw-Core/channels/

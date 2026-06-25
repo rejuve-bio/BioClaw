@@ -1,4 +1,4 @@
-# BioClaw — Phase 1: Conductor + AssistantOC + ReasonerOC.
+# BioClaw — Conductor + AssistantOC + ReasonerOC.
 #
 # Bring up:    docker compose up -d
 # Logs (all):  docker compose logs -f
@@ -29,7 +29,7 @@ x-common-env: &common-env
   BIOCLAW_INTERPRETER_MAX_TOKENS: ${BIOCLAW_INTERPRETER_MAX_TOKENS:-450}
   BIOCLAW_LLM_ROUTING: ${BIOCLAW_LLM_ROUTING:-true}
   BIOCLAW_ROUTER_PROVIDER: ${BIOCLAW_ROUTER_PROVIDER:-OpenRouter}
-  # BioKG backend selection. Defaults to disabled until URI/password are set.
+  # BioKG backend selection. Current demo path is BIOKG_BACKEND=mork.
   BIOKG_BACKEND: ${BIOKG_BACKEND:-disabled}
   NEO4J_URI: ${NEO4J_URI:-}
   NEO4J_USER: ${NEO4J_USER:-neo4j}

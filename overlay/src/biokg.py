@@ -1,12 +1,13 @@
 """BioKG access layer — backend-agnostic.
 
-Phase 2A: Neo4j backend (active). MORK/AtomSpace backend (stub).
-Phase 2B: staging area + human-approval workflow (stage_edge / list_staging /
-          promote / reject) on top of the same backend.
+Current BioClaw deployments use the MORK/MeTTa AtomSpace backend. Neo4j support
+is retained for older BioCypher deployments.
+Staging area + human-approval workflow (stage_edge / list_staging / promote /
+reject) lives on top of the configured backend.
 
 Switching backends is a single env var flip:
-    BIOKG_BACKEND=neo4j    (default; needs NEO4J_URI/USER/PASSWORD)
-    BIOKG_BACKEND=mork     (future; needs MORK_URI etc.)
+    BIOKG_BACKEND=mork     (current demo path; needs MORK_URI)
+    BIOKG_BACKEND=neo4j    (optional; needs NEO4J_URI/USER/PASSWORD)
     BIOKG_BACKEND=disabled (returns a friendly error from every call)
 
 The skill API exposed to MeTTa:

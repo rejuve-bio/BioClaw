@@ -1,382 +1,579 @@
-# BioClaw — Phase 1
+# BioClaw
 
-A multi-agent biocurator assistant built on OmegaClaw. Three agents coordinate
-to answer biology questions grounded in a BioKG (BioCypher-loaded Neo4j), with
-formal evidence reasoning via PLN and a human-in-the-loop approval gate for any
-new edges entering the canonical knowledge graph.
+BioClaw is a biology-domain OmegaClaw system for grounded BioKG curation,
+lookup, and evidence reasoning. It runs three OmegaClaw agents over Docker:
 
+- **Conductor**: talks to the user, handles greeting/help, staging approval,
+  and coarse specialist routing. It does not execute biology queries itself.
+- **AssistantOC**: handles BioKG retrieval work: entity summaries, direct
+  annotations, provenance, schema-path lookups, and proposed edge staging.
+- **ReasonerOC**: handles evidence work: PLN/STV evidence merge,
+  source aggregation, cross-method confidence, and cautious interpretation.
+
+Current default deployment uses a **MORK/MeTTa BioKG Atomspace** as the KG
+backend. Neo4j support still exists in the code, but the active BioClaw demo
+path is MORK, not Cypher.
+
+```text
+IRC or Telegram user
+        |
+        v
+Conductor  --internal RPC-->  AssistantOC  --BioKG tool--> MORK/MeTTa BioKG
+        |
+        +--internal RPC-->  ReasonerOC     --PLN/STV + BioKG tool--> MORK/MeTTa BioKG
+
+Workflow memory is per-agent Docker volume state. It is audit/context only;
+BioClaw does not treat memory as biological truth.
 ```
-   IRC / Telegram ──► Conductor ──► AssistantOC   (HTTP, internal-rpc channel)
-                              └─► ReasonerOC
-```
 
-## Architecture
+## What Is In The Current MORK Atomspace?
 
-Three agents, each running OmegaClaw with a role-specific prompt:
+This repository is usually run against a smaller human-focused BioKG/MORK
+snapshot for development and demos, not a full Human Atomspace. The bundled
+schema currently covers the entity/edge classes needed for the demo, such as
+`gene`, `transcript`, `protein`, `molecular_function`, `biological_process`,
+`cellular_component`, `pathway`, `disease`, and `enhancer`.
 
-| Agent | Role | Owns |
-|---|---|---|
-| **Conductor** | Talks to the biocurator; routes questions; owns the approval workflow. Does not do biology itself. | `biokg-promote`, `biokg-reject`, `biokg-list-staging`, `ask-agent` |
-| **AssistantOC** | Biocurator-facing switchboard: lookups, provenance, explanations, edge proposals. Five distinct intent sections inside one prompt. | `biokg-lookup`, `biokg-provenance`, `biokg-stage`, `biokg-schema` |
-| **ReasonerOC** | Formal-reasoning substrate. All NAL / PLN / AtomSpace work lives here. | `biokg-pln-evidence-merge`, `biokg-pln-source-aggregate`, three more in backlog |
+That subset is enough to validate the architecture: schema-grounded routing,
+MORK lookup, provenance, schema path traversal, staging, and PLN/STV evidence
+aggregation. It should not be described as a complete human biology KG.
 
-The original design called for seven specialists. Phase 1 collapses that to
-three for reliability: with a weak underlying LLM (Minimax), seven coordinating
-agents introduced too many failure points. AssistantOC's prompt has five
-distinct intent sections — lookup, provenance, explanation, proposal,
-delegate-formal — each one maps cleanly to a Phase-2 specialist when the
-substrate is mature enough to split them out. The design isn't gone, it's
-staged.
+Scaling to a larger Human AS is intended to be schema/data driven:
 
-## Layout
+1. Load the larger BioKG into MORK.
+2. Mount or point BioClaw at the matching BioCypher schema.
+3. Ensure entity name properties, source annotations, evidence codes, and edge
+   confidence/score fields are present and aligned.
+4. Tune `overlay/config/reasoning.yaml` for that deployment's source mix.
+5. Validate MORK query performance and sentinel answers.
 
-```
+Replacing only the schema is not enough if the matching MORK atoms are not also
+loaded.
+
+## Repository Layout
+
+```text
 bioclaw/
-├── Dockerfile              # FROM singularitynet/omegaclaw:hackathon2604
-├── docker-compose.yml      # 3 services on a shared network
-├── overlay/                # files copied INTO the image at build time
+├── Dockerfile
+├── docker-compose.yml
+├── .env.example
+├── overlay/
 │   ├── conductor-prompt.txt
 │   ├── assistant-prompt.txt
 │   ├── reasoner-prompt.txt
 │   ├── channels/
-│   │   └── internal_rpc.py     # HTTP-server channel adapter
+│   │   ├── internal_rpc.py
+│   │   └── irc.py
 │   ├── config/
-│   │   ├── schema.yaml         # BioCypher schema (loaded entities/edges)
-│   │   └── data_sources.yaml   # source-token → URL registry
+│   │   ├── schema.yaml          # BioCypher schema for the loaded BioKG subset
+│   │   ├── data_sources.yaml    # readable source names / URLs
+│   │   └── reasoning.yaml       # STV defaults, evidence/source priors, score normalization
+│   ├── lib_llm_ext.py           # OpenRouter/LLM provider integration
 │   └── src/
-│       ├── biokg.py            # all biokg-* skills (lookup, PLN, stage, etc.)
-│       ├── helper.py           # runtime sanitizer for weak-LLM output
-│       ├── peers.py            # conductor's HTTP client
-│       ├── channels.metta      # patched: dispatches internal-rpc
-│       └── skills.metta        # patched: registers ask-agent + biokg skills
-├── scripts/
-│   └── bioclaw-up              # interactive launcher
-└── .env                        # written by the launcher (gitignored)
+│       ├── biokg.py             # MORK/Neo4j BioKG tools, PLN/STV, staging
+│       ├── router.py            # conductor and specialist tool routing
+│       ├── interpretation.py    # deterministic/LLM grounded answer rewriting + case trace
+│       ├── peers.py             # conductor -> specialist HTTP client
+│       ├── helper.py            # OmegaClaw output sanitizer
+│       └── skills.metta         # biokg-* skill registration
+└── scripts/
+    ├── bioclaw-up
+    └── bioclaw-sentinel-check.sh
 ```
 
-## Run
+## Requirements
+
+- Docker and Docker Compose v2.
+- Access to the base image `singularitynet/omegaclaw:hackathon2604`, or an
+  already-built local `bioclaw:phase0` image.
+- An LLM key. The current recommended path is OpenRouter with GLM-5.1. The
+  model is fixed in `overlay/lib_llm_ext.py` as `z-ai/glm-5.1`; do not switch
+  a shared OpenRouter key to arbitrary models.
+- A reachable MORK service with BioKG atoms already loaded.
+
+BioClaw does **not** create or populate the MORK Atomspace by itself. It queries
+an existing MORK endpoint.
+
+## Quick Start With MORK
+
+### 1. Clone And Enter The Repo
 
 ```bash
-./scripts/bioclaw-up
+git clone <repo-url> bioclaw
+cd bioclaw
 ```
 
-You'll be prompted for the bot token, the LLM provider, and the API key. The
-script writes `.env`, builds the image, and brings up the stack.
-
-After startup, watch all three agents at once:
+If you are working inside this monorepo:
 
 ```bash
-docker compose logs -f
+cd /Users/a/projects/omegaclaw/bioclaw
 ```
 
-## Working capabilities
-
-Every supported question grounds in a BioKG query against the configured backend. PLN
-skills add deterministic truth-value math on top.
-
-| Question pattern | Specialist | Skill |
-|---|---|---|
-| `hi`, `what can you do?` | Conductor only | (direct send) |
-| `what does GENE_SYMBOL do?` | AssistantOC | `biokg-lookup` |
-| `what protein does GENE_SYMBOL translate to?` | AssistantOC | `biokg-schema-path-lookup` (schema-driven path traversal, e.g. gene -> transcript -> protein) |
-| `who said SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY?` | AssistantOC | `biokg-provenance` |
-| `reconcile SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY` | ReasonerOC | `biokg-pln-evidence-merge` |
-| `is TARGET_ENTITY connected to NEIGHBOR_LABEL?` | ReasonerOC | `biokg-pln-schema-neighbor-aggregate` |
-| `propose adding edge: SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY` | AssistantOC | `biokg-stage` |
-| `show staging` | Conductor only | `biokg-list-staging` |
-| `approve <hex>` / `reject <hex>` | Conductor only | `biokg-promote` / `biokg-reject` |
-
-Lookup replies are capped by `BIOKG_MAX_CONNECTIONS` (default `20`) so IRC and
-LLM contexts stay readable. The count in a lookup response means "returned in
-this lookup", not necessarily the entity's total number of KG edges. Displayed
-examples are chosen deterministically by code: names are cleaned and deduplicated,
-very broad ontology labels are lightly deprioritized, and concise terms are shown
-before long labels. The selector is gene-agnostic; it does not special-case any
-entity or relation.
-
-Three skills still in the backlog are exposed as safe Phase 2 limitation
-responses, not active reasoning implementations:
-
-- `biokg-nal-hypothesize ENTITY` — derive novel edges by NAL forward-chaining
-- `biokg-pln-chain-confidence START|END|EDGE_TYPES` — confidence along a path
-- `biokg-pln-compose-belief QUESTION` — compound multi-edge-type questions
-
-## Formal-reasoning substrate (the OmegaClaw thesis)
-
-`biokg-pln-evidence-merge SOURCE|EDGE_TYPE|TARGET`
-
-For a single edge between two specific nodes:
-1. The configured BioKG backend pulls every parallel relationship of that type.
-2. Each edge's `(source, evidence_code, edge_confidence)` is mapped to a
-   deterministic `stv(f, c)` via `overlay/config/reasoning.yaml`.
-3. PLN's `Truth_Revision` rule combines the per-edge stvs into one merged stv.
-4. Output is a single line, deterministic, reproducible, byte-exact.
-
-`biokg-pln-source-aggregate TARGET|EDGE_TYPE[|NEIGHBOR_LABEL]`
-
-For cross-method consensus around a target node:
-1. The configured BioKG backend pulls every edge of `EDGE_TYPE` incident to `TARGET`.
-2. If `NEIGHBOR_LABEL` is supplied, keeps only edges whose other endpoint has
-   that node label.
-3. Groups edges by recorded source/method.
-4. Computes per-source mean confidence.
-5. PLN-revises the per-source means into one cross-method consensus stv.
-6. Reports per-source `n`, `mean`, `max` so the biocurator can sanity-check.
-
-Natural relationship questions use the schema-derived form
-`TARGET|NEIGHBOR_LABEL`. BioClaw resolves the target's entity label, asks the
-loaded schema which edge type connects that label to `NEIGHBOR_LABEL`, and then
-runs the same source aggregate with that edge and neighbor filter. This keeps
-the reasoning primitive relation-agnostic: any schema edge type with multiple
-sources can be aggregated without adding a Python or prompt rule.
-`biokg-schema-neighbor TARGET|NEIGHBOR_LABEL` reports the exact schema edge and
-aliases used, so KG/schema mismatches stay visible instead of being guessed over.
-
-The TOKEN FIDELITY rule in both the Conductor and Reasoner prompts ensures
-`stv(f, c)` values are copied byte-for-byte through the relay chain. They're
-never paraphrased, rounded, or regenerated.
-
-## Staging → human approval → promotion
-
-Specialists never write directly to canonical BioKG. Every new edge goes
-through the approval gate:
-
-```
-biocurator:  propose adding edge: SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY
-Conductor:   Working on it; routing the proposal...
-             (→ AssistantOC runs biokg-stage → returns [STAGED edge b534b898])
-Conductor:   [STAGED edge b534b898] (source_label:SOURCE_ENTITY) -[EDGE_TYPE]-> (target_label:TARGET_ENTITY)
-             To approve, reply: approve b534b898. To reject, reply: reject b534b898.
-
-biocurator:  approve b534b898
-Conductor:   Promoted [b534b898] (edge type EDGE_TYPE) into BioKG; provenance retained.
-```
-
-### Storage model
-
-Every staged edge lives in the same Neo4j as canonical truth but carries
-extra properties:
-
-- `_staging_id` — 8-char hex token used in approve/reject
-- `_staged_by` — proposing specialist
-- `_staged_at` — ISO datetime
-- `_evidence` — free-text justification
-- `_confidence` — initial proposer confidence (default 0.7)
-- `_status` — `pending` | `promoted` | `rejected`
-
-`promote()` retains the agent-provenance fields (`_staged_by`, `_staged_at`,
-`_evidence`) and just flips `_status='pending'` → `_status='promoted'`. Only
-the staging-state markers (`_staging_id`, the pending flag) are stripped.
-Lineage is queryable forever.
-
-### Inspecting in Neo4j directly
-
-```cypher
-// All pending proposals
-MATCH (s)-[r]->(t) WHERE r._status = 'pending'
-RETURN s, r, t LIMIT 25;
-
-// Promoted-via-stage edges for a named gene
-MATCH (g:gene {gene_name:'GENE_SYMBOL'})-[r]->(m)
-WHERE r._staged_by IS NOT NULL AND r._status = 'promoted'
-RETURN g.gene_name, type(r), r._staged_by, r._evidence, m;
-```
-
-### Bypassing chat for direct testing
+### 2. Create `.env`
 
 ```bash
-# Stage from inside the conductor (skips the LLM)
-docker exec bioclaw-conductor python3 -c \
-  "import sys; sys.path.insert(0,'/PeTTa/repos/OmegaClaw-Core/src'); \
-   import biokg; print(biokg.stage_pipe('SOURCE_ENTITY|EDGE_TYPE|TARGET_ENTITY|test'))"
-
-# List pending
-docker exec bioclaw-conductor python3 -c \
-  "import sys; sys.path.insert(0,'/PeTTa/repos/OmegaClaw-Core/src'); \
-   import biokg; print(biokg.list_staging())"
-
-# Promote (paste the hex from above)
-docker exec bioclaw-conductor python3 -c \
-  "import sys; sys.path.insert(0,'/PeTTa/repos/OmegaClaw-Core/src'); \
-   import biokg; print(biokg.promote('a1b2c3d4'))"
+cp .env.example .env
+nano .env
 ```
 
-## Engineering hardening for weak LLMs
-
-A lot of the runtime stability work is in `overlay/src/helper.py`. The
-sanitizer runs in the agent loop before MeTTa parsing and catches Minimax's
-common misbehaviors:
-
-- Strips wrapper tokens: `[TOOL_CALL]`, `<tool_call>`, `<function_call>`,
-  ` ```json ` markdown fences, JSON tool-call shapes.
-- Drops placeholder lines: `{}`, `[]`, `(empty)`, `none`, `null`.
-- Drops monologue patterns: lines starting with `I should`, `Looking at`,
-  `According to`, `the user's message`, `for this turn`, etc.
-- Drops feedback echo patterns: sends that quote `ERROR_FEEDBACK:`,
-  `HUMAN_MESSAGE:`, `LAST_SKILL_USE_RESULTS:`.
-- Whitelists known skills (`KNOWN_SKILLS` set plus a `biokg-*` prefix rule)
-  so unknown first tokens are auto-wrapped as `send <prose>` instead of
-  silently dropped.
-- Caps one `send` per turn. Kills triple-greeting and paraphrase cascades.
-
-A parallel piece in `overlay/src/peers.py` caps relay payloads at 1500 chars
-(`BIOCLAW_RELAY_MAX_CHARS`) and wraps error returns with the
-`[role-agent replied — relay this verbatim]:` tag so the Conductor knows to
-forward errors instead of silently dropping them.
-
-These are not biology fixes. They're tool-use discipline. The system runs
-coherently on Minimax because of them.
-
-## Schema config
-
-BioClaw reads its KG schema from a BioCypher-format YAML file at
-`/opt/bioclaw/config/schema.yaml`. It's the canonical biocypher-kg schema,
-restricted to the entities and edges actually loaded into the configured BioKG
-backend.
-
-### What the loader extracts
-
-- **Nodes** (`represented_as: node`): the `input_label` becomes the backend
-  label; the property annotated `biolink: name` becomes the lookup property.
-  Inheritance via `is_a` + `inherit_properties: true` is followed — that's how
-  GO terms and disease pick up `term_name` from `ontology term`.
-- **Edges** (`represented_as: edge`): `output_label` (or `input_label`)
-  becomes the backend relationship type. `source` and `target` (entity name or
-  list) become the allowed endpoint types for `biokg-stage` validation.
-
-### Customizing
-
-Two knobs in `.env`:
+For the current MORK-backed setup, use values like this:
 
 ```bash
-# Point at any BioCypher schema_config.yaml
-BIOCLAW_SCHEMA_FILE=/path/inside/container/schema.yaml
+COMMCHANNEL=irc
+IRC_CHANNEL=##bioclaw-your-suffix
+IRC_USER=bioclaw-bot-your-suffix
+IRC_SERVER=irc.quakenet.org
+IRC_PORT=6667
 
-# Override the auto-derived name-property list only if needed
-BIOCLAW_NAME_PROPERTIES=gene_name,protein_name,term_name,id
+LLM_PROVIDER=OpenRouter
+EMBED_PROVIDER=Local
+OPENROUTER_API_KEY=sk-or-...
+BIOCLAW_ANSWER_STYLE=llm
+BIOCLAW_INTERPRETER_PROVIDER=OpenRouter
+BIOCLAW_ROUTER_PROVIDER=OpenRouter
+BIOCLAW_LLM_ROUTING=true
+BIOCLAW_INTERPRETER_MAX_TOKENS=450
+
+AUTH_SECRET=<random-string>
+
+BIOKG_BACKEND=mork
+MORK_URI=http://mork-biocypher:8027
+MORK_NAMESPACE=default
+
+BIOCLAW_SCHEMA_FILE=/opt/bioclaw/config/schema.yaml
+BIOCLAW_DATASOURCE_FILE=/opt/bioclaw/config/data_sources.yaml
+BIOCLAW_REASONING_FILE=/opt/bioclaw/config/reasoning.yaml
 ```
 
-## Reasoning config
-
-PLN/STV reasoning policy is configured in
-`overlay/config/reasoning.yaml`, mounted at
-`/opt/bioclaw/config/reasoning.yaml`. The default file is intentionally neutral
-and defines:
-
-- `default_stv` and `action_threshold`
-- empty optional maps for deployment-calibrated evidence-code priors
-- empty optional maps for deployment-calibrated source priors
-- empty optional maps for deployment-calibrated source score normalizers
-- configurable edge annotation names to inspect for per-edge confidence/score
-
-By default, BioClaw uses numeric per-edge confidence annotations in `[0, 1]`
-when the KG provides them; otherwise it falls back to neutral `default_stv`.
-Raw score annotations are only used after a deployment supplies a
-`score_normalization` rule for that source, because score scales are not
-universally comparable. Large BioKG deployments can mount a separate calibrated
-reasoning file if they have validated reliability priors. Those priors are
-deployment data, not schema relationships and not Python routing logic.
-
-### Schema validation
-
-When `biokg-stage SRC|EDGE|TGT|...` is called, the schema enforces:
-
-1. `EDGE` exists in the schema.
-2. The backend label of `SRC` is in the edge's allowed `source` list.
-3. The backend label of `TGT` is in the edge's allowed `target` list.
-
-Violations return `error: schema validation failed: ...` instead of silently
-creating a malformed proposal.
-
-### Introspection skill
-
-```
-biokg-schema
-```
-
-Prints all entity labels with their name property, plus all edge types with
-their allowed source/target labels.
-
-## BioKG backend
-
-BioClaw currently talks to the configured MORK/MeTTa BioKG backend for the
-containerized demo. Cypher is not used in the active MORK path; structural
-queries are expressed through schema-aware MeTTa patterns.
-
-If you switch to a Neo4j backend in another deployment, connection details live
-in `.env`:
+Generate a channel suffix and auth secret if needed:
 
 ```bash
-NEO4J_URI=bolt+s://your-host:7687
-NEO4J_USER=neo4j
-NEO4J_PASSWORD=...
-NEO4J_DATABASE=neo4j
+echo "##bioclaw-$(openssl rand -hex 4)"
+openssl rand -base64 24 | tr -d '\n=' | head -c 32; echo
 ```
 
-Then `docker compose up -d --force-recreate` so all three agents pick up the
-new endpoint. Same code, different KG.
+### 3. Make MORK Reachable From BioClaw
 
-If your Neo4j runs in a separate compose project on the same host, attach it
-to bioclaw's network:
+If the MORK container is already on the same Docker network as BioClaw and is
+named `mork-biocypher`, `MORK_URI=http://mork-biocypher:8027` is enough.
+
+If MORK is running in a separate Compose project, connect it to BioClaw's
+network. One reliable sequence is:
 
 ```bash
-docker network connect bioclaw_default <neo4j-container>
+# Create BioClaw containers/network without starting the services yet.
+docker compose create
+
+# Replace mork-biocypher with the actual MORK container name.
+docker network connect bioclaw_default mork-biocypher
+
+# Start BioClaw.
+docker compose up -d --force-recreate conductor assistant-oc reasoner-oc
 ```
 
-## Provenance — two complementary kinds
-
-`biokg-provenance ENTITY` returns both kinds the KG carries:
-
-1. **BioCypher source provenance** — embedded by the BioCypher pipeline
-   during ingestion:
-   - On nodes: `source`, `source_url` (e.g. `source=GENCODE`, `UniProt`)
-   - On edges: `source`, `db_reference`, `evidence`, `evidence_code`,
-     `reference`, `date`
-   - Output tag: `[BioCypher: edge source=...; db_ref=...; ...]`
-2. **BioClaw agent provenance** — written by specialists via `biokg-stage`
-   and preserved on `biokg-promote`:
-   - `_staged_by`, `_staged_at`, `_evidence`, `_confidence`, `_promoted_at`,
-     `_status`
-   - Output tag: `[BioClaw: proposed by AGENT on DATE; status=...; ...]`
-
-The `overlay/config/data_sources.yaml` file maps source tokens that appear in
-Neo4j (`gaf`, `GENCODE`, `Gene Ontology`, etc.) to full names + canonical URLs
-so output reads e.g. `Gene Ontology <http://purl.obolibrary.org/obo/go.owl>`
-instead of the bare token.
-
-## Common operations
+If you already started BioClaw before connecting MORK, connect the network and
+then recreate the agents:
 
 ```bash
-docker compose ps                     # who's up
-docker compose logs -f conductor      # one agent's logs
-docker compose restart assistant-oc   # bounce one agent
-docker compose down                   # stop, keep memory
-docker compose down -v                # stop + wipe memory for a fresh state
-docker compose build --no-cache       # force rebuild
+docker network connect bioclaw_default mork-biocypher
+docker compose up -d --force-recreate conductor assistant-oc reasoner-oc
 ```
 
-Most BioClaw overlay files are bind-mounted into the containers, so after a
-normal code change in `overlay/src/`, `overlay/channels/`, prompts, or
-`overlay/lib_llm_ext.py`:
+### 4. Build Or Start
+
+If the base image can be pulled:
+
+```bash
+docker compose build conductor assistant-oc reasoner-oc
+docker compose up -d conductor assistant-oc reasoner-oc
+```
+
+If Docker Hub times out but you already have `bioclaw:phase0` locally, skip the
+build and recreate from the local image:
 
 ```bash
 docker compose up -d --force-recreate conductor assistant-oc reasoner-oc
 ```
 
-Use a Docker rebuild only when the `Dockerfile` or image-level dependencies
-change.
+### 5. Confirm The Environment Inside Containers
 
-## Phase 2 — what's next
+```bash
+docker exec bioclaw-conductor env | grep -E 'BIOKG_BACKEND|MORK_URI|MORK_NAMESPACE|LLM_PROVIDER|BIOCLAW_ANSWER_STYLE'
+docker exec bioclaw-assistant-oc env | grep -E 'BIOKG_BACKEND|MORK_URI|OPENROUTER|BIOCLAW_INTERPRETER|BIOCLAW_ANSWER_STYLE'
+docker exec bioclaw-reasoner-oc env | grep -E 'BIOKG_BACKEND|MORK_URI|OPENROUTER|BIOCLAW_INTERPRETER|BIOCLAW_ANSWER_STYLE'
+```
 
-Once the three backlog reasoning skills land, Phase 2 begins: promoting
-AssistantOC's five intent sections into dedicated specialists, each
-exercising a distinct OmegaClaw capability. The architecture already routes
-through `ask-agent`, so splitting the intents out is a matter of moving
-sections of the AssistantOC prompt into new role files and adding services in
-`docker-compose.yml`.
+You should see `BIOKG_BACKEND=mork` and a non-empty `MORK_URI` in all three
+containers.
 
-The `bioclaw-entrypoint.sh` script generalizes the prompt swap — it looks for
-`/opt/bioclaw/${BIOCLAW_PROMPT}-prompt.txt`. Adding a specialist is: drop a
-`<role>-prompt.txt`, add a service in compose with `BIOCLAW_PROMPT=<role>`,
-add its URL to the Conductor's `BIOCLAW_PEERS`, mention it in the Conductor
-prompt's routing rules.
+### 6. Smoke Test BioKG From Inside A Container
+
+```bash
+docker exec -i bioclaw-conductor python3 - <<'PY'
+import sys
+sys.path.insert(0, '/PeTTa/repos/OmegaClaw-Core/src')
+import biokg
+print(biokg.lookup('IMPACT'))
+print(biokg.schema_neighbor_lookup_pipe('IMPACT|biological_process'))
+print(biokg.schema_path_lookup_pipe('IMPACT|protein'))
+print(biokg.pln_schema_neighbor_aggregate_pipe('IMPACT|enhancer'))
+PY
+```
+
+Expected shape, not exact wording:
+
+- `IMPACT` resolves as a gene.
+- Biological-process lookup returns direct annotations.
+- Protein lookup uses a schema path like `gene -> transcribes_to -> transcript -> translates_to -> protein`.
+- Enhancer aggregate reports source-level evidence if the snapshot contains it.
+
+### 7. Run The Sentinel Check
+
+```bash
+./scripts/bioclaw-sentinel-check.sh
+```
+
+This checks that Conductor, AssistantOC, and ReasonerOC all see the same BioKG
+state for important sentinel queries such as:
+
+- `IMPACT|enhancer`
+- `TP53|disease`
+- `BRCA1|enables|zinc ion binding`
+
+Passing this script is the best pre-IRC sanity check.
+
+### 8. Try IRC
+
+Join the configured IRC channel, then ask:
+
+```text
+hello
+Can you summarize what IMPACT is known to do?
+What molecular functions does IMPACT enable?
+Which biological processes is IMPACT involved in?
+Where is IMPACT located in the cell?
+Does IMPACT have a protein product?
+Could IMPACT be controlled by enhancers in this KG?
+Does BioKG have disease evidence for IMPACT?
+What evidence sources support TP53 disease association?
+Where did the zinc-binding statement for BRCA1 come from?
+How strong is the support for BRCA1 zinc binding?
+source of BRCA1 enables zinc ion binding
+reconcile BRCA1 enables zinc ion binding
+```
+
+Routing expectations:
+
+- Summary, location, function, process, protein-product, provenance, and staging
+  requests route to **AssistantOC**.
+- Evidence, confidence, reconcile, aggregate, disease-association, and enhancer
+  regulation/support requests route to **ReasonerOC**.
+
+## Current Capabilities
+
+| User request | Specialist | Grounded tool path |
+|---|---|---|
+| Greeting/help | Conductor | direct reply |
+| `what does IMPACT do?` | AssistantOC | `biokg.functional_summary` |
+| `what molecular functions does IMPACT enable?` | AssistantOC | `biokg.schema_neighbor_lookup_pipe(entity|neighbor)` |
+| `where is IMPACT located?` | AssistantOC | schema-neighbor lookup through `cellular_component` |
+| `does IMPACT have a protein product?` | AssistantOC | `biokg.schema_path_lookup_pipe(entity|protein)` |
+| `source of BRCA1 enables zinc ion binding` | AssistantOC | `biokg.provenance` |
+| `propose adding edge: ...` | AssistantOC + Conductor | `biokg.stage_pipe`, then approve/reject |
+| `is IMPACT enhancer-regulated?` | ReasonerOC | `biokg.pln_schema_neighbor_aggregate_pipe(entity|enhancer)` |
+| `What evidence sources support TP53 disease association?` | ReasonerOC | schema-neighbor source aggregate through `disease` |
+| `reconcile BRCA1 enables zinc ion binding` | ReasonerOC | `biokg.pln_evidence_merge_pipe` |
+| `export TP53 biological processes as csv` | AssistantOC | `biokg.export_schema_neighbor_pipe(entity|neighbor|format)` |
+
+The LLM is used for flexible language understanding and grounded answer
+rewriting, but the biological facts still come from BioKG/MORK tools. If a tool
+returns no support, BioClaw should say that the configured KG snapshot did not
+return support; it should not invent external biology.
+
+## MORK BioKG Tooling
+
+MORK is queried through MeTTa pattern operations in `overlay/src/biokg.py`:
+
+- `/export` for direct pattern export.
+- `/transform` for joined pattern queries with source/evidence annotations.
+- `/upload` and `/clear` for staged proposal atoms.
+
+`biokg-query` is intentionally not Cypher in MORK mode. If a user tries a
+Cypher query against MORK, BioClaw returns a message explaining that MORK uses
+MeTTa pattern queries and that schema tools should be used instead.
+
+Useful direct checks:
+
+```bash
+# Entity summary
+docker exec -i bioclaw-conductor python3 - <<'PY'
+import sys
+sys.path.insert(0, '/PeTTa/repos/OmegaClaw-Core/src')
+import biokg
+print(biokg.functional_summary('TP53'))
+PY
+
+# Schema-neighbor mapping without querying edges
+docker exec -i bioclaw-conductor python3 - <<'PY'
+import sys
+sys.path.insert(0, '/PeTTa/repos/OmegaClaw-Core/src')
+import biokg
+print(biokg.schema_neighbor_pipe('TP53|disease'))
+PY
+
+# Full export for downstream analysis
+docker exec -i bioclaw-conductor python3 - <<'PY'
+import sys
+sys.path.insert(0, '/PeTTa/repos/OmegaClaw-Core/src')
+import biokg
+print(biokg.export_schema_neighbor_pipe('TP53|biological_process|csv'))
+PY
+```
+
+Exports are written inside the container to `BIOCLAW_EXPORT_DIR`, defaulting to
+`/tmp/bioclaw_exports`. If you need persistent exports, mount a host directory
+and set `BIOCLAW_EXPORT_DIR` to that mounted path.
+
+## Schema Configuration
+
+BioClaw reads a BioCypher-format schema from:
+
+```bash
+BIOCLAW_SCHEMA_FILE=/opt/bioclaw/config/schema.yaml
+```
+
+The schema is used to:
+
+- Resolve entity classes and their name properties.
+- Validate staged edges.
+- Infer direct schema-neighbor lookups.
+- Traverse schema paths, for example gene -> transcript -> protein.
+- Keep routing and reasoning relation-agnostic instead of hardcoding every
+  biological edge type.
+
+To use a larger or different BioKG snapshot:
+
+1. Load the matching atoms into MORK.
+2. Replace `overlay/config/schema.yaml` or mount another schema inside the
+   containers.
+3. Set `BIOCLAW_SCHEMA_FILE` to the mounted path.
+4. Recreate all three agents.
+
+```bash
+docker compose up -d --force-recreate conductor assistant-oc reasoner-oc
+```
+
+The schema and data must agree. If the schema says a gene can connect to a
+protein through transcript edges, but the MORK Atomspace does not contain those
+atoms, BioClaw will report that the schema path exists but no path instances
+were found.
+
+## Reasoning Configuration
+
+`overlay/config/reasoning.yaml` controls how evidence becomes STV values. These
+settings are not biological relationships; they are reliability/normalization
+configuration.
+
+Priority order for STV confidence is:
+
+1. Per-edge confidence in `[0, 1]`, if present.
+2. Per-edge score, only if the source has a configured score normalizer.
+3. Evidence-code STV prior, if configured.
+4. Source STV prior, if configured.
+5. Neutral `default_stv` fallback.
+
+For large deployments, tune this file to the source mix and score scales. Do not
+encode biology-specific answers here.
+
+## Memory Model
+
+Each agent has an isolated Docker volume:
+
+- `conductor-memory`
+- `assistant-memory`
+- `reasoner-memory`
+
+BioClaw also writes structured case traces from interpreted tool calls unless
+disabled:
+
+```bash
+BIOCLAW_CASE_MEMORY=true
+BIOCLAW_CASE_MEMORY_FILE=/PeTTa/repos/OmegaClaw-Core/memory/bioclaw_case_memory.jsonl
+```
+
+Memory is workflow context and audit trace only. BioClaw should rerun grounded
+BioKG tools for biological facts rather than answering from memory alone.
+
+To fully reset agent memory:
+
+```bash
+docker compose down -v
+docker compose up -d --force-recreate conductor assistant-oc reasoner-oc
+```
+
+## Staging And Human Approval
+
+Proposed edges never become canonical silently.
+
+```text
+User:      propose adding edge: TP53 enables DNA binding, evidence: curator note
+Assistant: [STAGED edge abc12345] ... To approve, reply: approve abc12345. To reject, reply: reject abc12345.
+User:      show staging
+User:      reject abc12345
+```
+
+Supported commands:
+
+```text
+show staging
+approve <8-hex-id>
+reject <8-hex-id>
+```
+
+In MORK mode, staging writes proposal atoms into the same Atomspace with staging
+annotations. Promotion/rejection updates or removes the staged proposal.
+
+## Development Workflow
+
+Most files are bind-mounted into the containers. After editing prompts,
+`overlay/src`, `overlay/channels`, config files, or `overlay/lib_llm_ext.py`, a
+recreate is usually enough:
+
+```bash
+docker compose up -d --force-recreate conductor assistant-oc reasoner-oc
+```
+
+Rebuild only after Dockerfile or image dependency changes:
+
+```bash
+docker compose build conductor assistant-oc reasoner-oc
+```
+
+Useful commands:
+
+```bash
+docker compose ps
+docker compose logs -f conductor
+docker compose logs -f assistant-oc reasoner-oc
+docker compose restart assistant-oc
+docker compose down
+docker compose down -v
+```
+
+Local syntax checks:
+
+```bash
+PYTHONPYCACHEPREFIX=/tmp/bioclaw-pycache \
+  python3 -m py_compile overlay/src/router.py overlay/src/biokg.py overlay/src/interpretation.py overlay/lib_llm_ext.py
+
+git diff --check
+```
+
+## Troubleshooting
+
+### BioClaw says the backend is disabled
+
+Check `.env` and container env:
+
+```bash
+grep '^BIOKG_BACKEND=' .env
+docker exec bioclaw-conductor env | grep BIOKG_BACKEND
+```
+
+Set:
+
+```bash
+BIOKG_BACKEND=mork
+MORK_URI=http://mork-biocypher:8027
+```
+
+Then recreate the agents.
+
+### BioClaw cannot reach MORK
+
+Check that the MORK container is running and on the same Docker network:
+
+```bash
+docker ps | grep -i mork
+docker network inspect bioclaw_default | grep -i mork
+```
+
+If needed:
+
+```bash
+docker network connect bioclaw_default mork-biocypher
+docker compose up -d --force-recreate conductor assistant-oc reasoner-oc
+```
+
+### A question routes to the wrong specialist
+
+Check the conductor route directly:
+
+```bash
+docker exec -i -e BIOCLAW_PROMPT=conductor bioclaw-conductor python3 - <<'PY'
+import sys
+sys.path.insert(0, '/PeTTa/repos/OmegaClaw-Core/src')
+import router
+for q in [
+    'Can you summarize what IMPACT is known to do?',
+    'Could IMPACT be controlled by enhancers in this KG?',
+    'How strong is the support for BRCA1 zinc binding?',
+]:
+    print(q, '=>', router.route_direct(True, q))
+PY
+```
+
+Expected: summary -> AssistantOC; enhancer/support/confidence -> ReasonerOC.
+
+### The LLM returns empty or strange text
+
+Check interpreter logs:
+
+```bash
+docker compose logs --tail=200 assistant-oc reasoner-oc | grep -E 'LLM_RAW|OpenRouter|Exception|empty content|reasoning_tokens'
+```
+
+You can temporarily switch to deterministic formatting:
+
+```bash
+BIOCLAW_ANSWER_STYLE=interpreted
+```
+
+Then recreate the agents.
+
+### Docker build times out pulling the base image
+
+If you already have a local `bioclaw:phase0` image, skip build and run:
+
+```bash
+docker compose up -d --force-recreate conductor assistant-oc reasoner-oc
+```
+
+If not, retry the build when Docker Hub is reachable.
+
+## What BioClaw Does Not Claim Yet
+
+- It is not currently using a full Human Atomspace unless you explicitly load
+  one into MORK and point BioClaw at its schema.
+- It does not use chat memory as a source of biological facts.
+- It does not do arbitrary open-ended KG query planning for every possible
+  natural-language question yet.
+- It does not perform external literature lookup in the current default path.
+- It does not make clinical assertions; disease/phenotype outputs are KG support
+  useful for prioritization unless separately validated.
+
+## Optional Neo4j Backend
+
+Neo4j support remains available for deployments that still use a BioCypher Neo4j
+KG. Set:
+
+```bash
+BIOKG_BACKEND=neo4j
+NEO4J_URI=bolt://biocypher-neo4j:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=...
+NEO4J_DATABASE=neo4j
+```
+
+Then make sure the Neo4j container is reachable from the BioClaw Docker network
+and recreate the agents. This path is not the current MORK demo path.
