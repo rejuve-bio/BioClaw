@@ -1,7 +1,7 @@
 # BioClaw schema config — exact BioCypher format.
 #
 # This is a curated subset of the human BioCypher schema_config.yaml
-# (https://github.com/biocypher / rejuve-bio/biocypher-kg), restricted to the
+# (rejuve-bio/biocypher-kg), restricted to the
 # test slice currently loaded into the configured BioKG backend:
 #
 #   gene, protein, transcript, pathway, GO terms (BP/MF/CC), disease

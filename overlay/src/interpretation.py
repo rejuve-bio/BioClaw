@@ -24,11 +24,26 @@ def interpret_and_record(role: str, tool_call: str, user_text: str, raw_result: 
         final = raw
     elif style in {"llm", "natural", "polished"}:
         deterministic = interpret(role, tool_call, user_text, raw)
-        final = _llm_rewrite_grounded(role, tool_call, user_text, raw, deterministic)
+        if _skip_llm_rewrite(tool_call, raw):
+            final = deterministic
+        else:
+            final = _llm_rewrite_grounded(role, tool_call, user_text, raw, deterministic)
     else:
         final = interpret(role, tool_call, user_text, raw)
     _record_case(role, tool_call, user_text, raw, final)
     return final
+
+
+def _skip_llm_rewrite(tool_call: str, raw: str) -> bool:
+    """Keep structurally sensitive answers exact.
+
+    Schema-path answers name graph paths such as gene -> transcript -> protein.
+    The LLM sometimes compresses those into ungrammatical fragments or loses
+    the source entity, so keep them deterministic unless explicitly run raw.
+    """
+    if str(tool_call or "").startswith("biokg.schema_path_lookup_pipe"):
+        return True
+    return False
 
 
 def record_only(role: str, tool_call: str, user_text: str, raw_result: str) -> str:
@@ -52,7 +67,7 @@ def interpret(role: str, tool_call: str, user_text: str, raw_result: str) -> str
             answer = _append_once(answer, "Caveat:", "Caveat: " + " ".join(caveats))
         return answer
 
-    if tool_call.startswith("biokg.schema_neighbor_lookup_pipe"):
+    if tool_call.startswith(("biokg.schema_neighbor_lookup_pipe", "biokg.schema_path_lookup_pipe")):
         answer = raw
         if caveats:
             answer = _append_once(answer, "Caveat:", "Caveat: " + " ".join(caveats))
@@ -148,7 +163,9 @@ def _llm_rewrite_grounded(role: str, tool_call: str, user_text: str, raw: str, d
         return deterministic
     if _looks_ungrounded(answer):
         return deterministic
-    return _preserve_critical_tokens(answer, raw)
+    if _contradicts_positive_grounding(answer, raw):
+        return deterministic
+    return _preserve_critical_tokens(answer, raw, deterministic)
 
 
 def _grounded_rewrite_prompt(role: str, tool_call: str, user_text: str, raw: str, deterministic: str) -> str:
@@ -199,13 +216,40 @@ def _looks_ungrounded(answer: str) -> bool:
     return any(phrase in lower for phrase in banned)
 
 
-def _preserve_critical_tokens(answer: str, raw: str) -> str:
+def _contradicts_positive_grounding(answer: str, raw: str) -> bool:
+    raw_lower = str(raw or "").lower()
+    answer_lower = str(answer or "").lower()
+    positive_markers = (
+        "biokg shows",
+        "biokg returned",
+        "biokg found",
+        "direct annotation",
+        "schema-path instance",
+    )
+    absence_markers = (
+        "did not return support",
+        "no support",
+        "no `",
+        "no '",
+        "no matching",
+        "no edges",
+        "not find",
+        "not found",
+    )
+    return any(marker in raw_lower for marker in positive_markers) and any(
+        marker in answer_lower for marker in absence_markers
+    )
+
+
+def _preserve_critical_tokens(answer: str, raw: str, fallback: str = "") -> str:
     missing = []
     for token in _critical_tokens(raw):
         if token not in answer:
             missing.append(token)
     if not missing:
         return answer
+    if any(not re.match(r"^stv\s+[0-9.]+/[0-9.]+$", token, flags=re.IGNORECASE) for token in missing):
+        return _single_line(fallback or raw)
     return _append_once(answer, "Grounded details:", "Grounded details: " + "; ".join(missing))
 
 

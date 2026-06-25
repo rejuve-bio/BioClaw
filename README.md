@@ -78,7 +78,7 @@ skills add deterministic truth-value math on top.
 |---|---|---|
 | `hi`, `what can you do?` | Conductor only | (direct send) |
 | `what does GENE_SYMBOL do?` | AssistantOC | `biokg-lookup` |
-| `what protein does GENE_SYMBOL translate to?` | AssistantOC | `biokg-lookup` (multi-hop traversal) |
+| `what protein does GENE_SYMBOL translate to?` | AssistantOC | `biokg-schema-path-lookup` (schema-driven path traversal, e.g. gene -> transcript -> protein) |
 | `who said SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY?` | AssistantOC | `biokg-provenance` |
 | `reconcile SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY` | ReasonerOC | `biokg-pln-evidence-merge` |
 | `is TARGET_ENTITY connected to NEIGHBOR_LABEL?` | ReasonerOC | `biokg-pln-schema-neighbor-aggregate` |

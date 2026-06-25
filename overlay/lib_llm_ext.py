@@ -2,6 +2,13 @@ import os, time
 import openai
 from typing import Optional
 
+def _provider_timeout() -> float:
+    try:
+        return float(os.environ.get("BIOCLAW_LLM_TIMEOUT", os.environ.get("LLM_TIMEOUT", "20")))
+    except (TypeError, ValueError):
+        return 20.0
+
+
 def _log_raw(provider: str, model: str, raw: str) -> None:
     ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
     print(f"[LLM_RAW] ts={ts} provider={provider} model={model} chars={len(raw or '')} raw={raw!r}")
@@ -108,6 +115,7 @@ class AIProvider(AbstractAIProvider):
             raise RuntimeError(f"{self.name} not configured (set {self._var_name})")
 
         content = content.replace(":-:-:-:", " ")
+        kwargs.setdefault("timeout", _provider_timeout())
         try:
             response = self._client.chat.completions.create(
                 model=self._model_name,
@@ -187,6 +195,7 @@ class OpenRouterProvider(AIProvider):
         extra_body = kwargs.pop("extra_body", {}) or {}
         extra_body.setdefault("reasoning", {"effort": "none", "exclude": True})
         kwargs.setdefault("temperature", 0)
+        kwargs.setdefault("timeout", _provider_timeout())
         try:
             response = self._client.chat.completions.create(
                 model=self._model_name,
@@ -218,6 +227,7 @@ class OpenAIProvider(AIProvider):
             sysmsg, usermsg = content.split(":-:-:-:", 1)
         else:
             sysmsg, usermsg = "", content
+        kwargs.setdefault("timeout", _provider_timeout())
         try:
             response = self._client.responses.create(
                 model=self._model_name,
@@ -284,12 +294,12 @@ _register_provider_instance(TestProvider())
 _register_provider_instance(OpenAIProvider(name="OpenAI", var_name="OPENAI_API_KEY", model_name="gpt-5.4", base_url="https://api.openai.com/v1"))
 
 
-def callProvider(provider_name: str, content: str, max_tokens: int = 6000, reasoning: str = "medium") -> str:
+def callProvider(provider_name: str, content: str, max_tokens: int = 6000, reasoning: str = "medium", **kwargs) -> str:
     """Generic dispatcher for MeTTa."""
     provider = _get_provider(provider_name)
     if not provider or not provider.is_available:
         raise RuntimeError(f"Provider '{provider_name}' not available")
-    return provider.chat(content=content, max_tokens=max_tokens, reasoning=reasoning)
+    return provider.chat(content=content, max_tokens=max_tokens, reasoning=reasoning, **kwargs)
 
 
 

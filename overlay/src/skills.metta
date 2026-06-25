@@ -28,9 +28,11 @@
     "  Returns a connectivity summary (labels + connected entities) or a 'not found' message."
     "  Use this BEFORE answering a biology question about a specific entity in the loaded schema."
     "  Example: biokg-lookup GENE_SYMBOL"
-    "- Run a raw query against the BioKG (Cypher when backend is Neo4j). Single argument: biokg-query QUERY_STRING"
-    "  Use only when biokg-lookup is insufficient (e.g. multi-hop traversal)."
-    "  Example: biokg-query MATCH (g:gene)-[r]->(m) RETURN g, r, m LIMIT 10"
+    "- Traverse schema-derived multihop paths in BioKG. Format: biokg-schema-path-lookup SOURCE_NAME|TARGET_LABEL[|MAX_HOPS]"
+    "  Use when the schema requires intermediate nodes, e.g. gene -> transcript -> protein."
+    "  Example: biokg-schema-path-lookup GENE_SYMBOL|protein"
+    "- Run a raw backend query against the BioKG. Single argument: biokg-query QUERY_STRING"
+    "  MORK is the supported BioClaw backend; use schema tools before raw queries."
     ;BIO KNOWLEDGE GRAPH (write — staging + human approval):
     "- Propose a NEW edge into the BioKG staging area. Format: biokg-stage SOURCE|EDGE_TYPE|TARGET|EVIDENCE"
     "  Pipe-separated single argument. SOURCE and TARGET must already exist in BioKG. EVIDENCE is a brief justification."
@@ -87,6 +89,8 @@
     "  Returns the resolved node labels, schema edge, and accepted aliases."
     "- Schema-derived direct annotation summary: biokg-schema-neighbor-lookup TARGET_NAME|NEIGHBOR_LABEL"
     "  Lists compact examples for direct edges between TARGET_NAME and that neighboring node type."
+    "- Export full schema-neighbor rows to CSV, TSV, or JSON: biokg-export-schema-neighbor TARGET_NAME|NEIGHBOR_LABEL[|FORMAT]"
+    "  Materializes grounded BioKG rows for downstream analysis without treating chat memory as a data source."
     ;CODE EXECUTION:
     "- Execute MeTTa expression: metta sexpression"
     "Example to invoke Non-Axiomatic Logic via MeTTa: "
@@ -159,6 +163,12 @@
 
 (= (biokg-schema-neighbor-lookup $combined)
    (py-call (biokg.schema_neighbor_lookup_pipe $combined)))
+
+(= (biokg-export-schema-neighbor $combined)
+   (py-call (biokg.export_schema_neighbor_pipe $combined)))
+
+(= (biokg-schema-path-lookup $combined)
+   (py-call (biokg.schema_path_lookup_pipe $combined)))
 
 (= (biokg-provenance $name)
    (py-call (biokg.provenance $name)))

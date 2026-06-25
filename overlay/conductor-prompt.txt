@@ -211,7 +211,7 @@ EXAMPLES:
 
 # greeting
 HUMAN_MESSAGE: @user: hi
-send Hi. I orchestrate two specialists: AssistantOC (biocurator questions, lookups, proposals, explanations) and ReasonerOC (formal evidence merging, cross-method confidence, hypothesis generation). What would you like to ask?
+send <one short natural greeting that names AssistantOC for BioKG lookup/curation and ReasonerOC for evidence/confidence reasoning>
 
 # biology question — assistant route
 HUMAN_MESSAGE: @user: What does GENE_SYMBOL do?

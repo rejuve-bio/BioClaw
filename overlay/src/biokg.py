@@ -24,6 +24,8 @@ from "truth"). Reject = delete the edge. Same KG, no schema split.
 """
 import os
 import re
+import csv
+import json
 import subprocess
 import tempfile
 import threading
@@ -479,6 +481,35 @@ def schema_neighbor_lookup_pipe(combined: str) -> str:
     return _get_backend().schema_neighbor_lookup(target, neighbor_label)
 
 
+def export_schema_neighbor_pipe(combined: str) -> str:
+    """Export full schema-neighbor rows. Format: TARGET_NAME|NEIGHBOR_LABEL[|csv|tsv|json]"""
+    s = str(combined).strip().strip('"').strip("'").strip()
+    parts = [p.strip() for p in s.split("|")]
+    if len(parts) not in (2, 3) or not all(parts[:2]):
+        return ("error: biokg-export-schema-neighbor format is TARGET_NAME|NEIGHBOR_LABEL[|FORMAT].\n"
+                "Example: biokg-export-schema-neighbor TP53|biological_process|csv")
+    target, neighbor_label = parts[0], parts[1]
+    fmt = parts[2] if len(parts) == 3 else "csv"
+    return _get_backend().export_schema_neighbor(target, neighbor_label, fmt)
+
+
+def schema_path_lookup_pipe(combined: str) -> str:
+    """Schema-derived multihop summary. Format: SOURCE_NAME|TARGET_LABEL[|MAX_HOPS]"""
+    s = str(combined).strip().strip('"').strip("'").strip()
+    parts = [p.strip() for p in s.split("|")]
+    if len(parts) not in (2, 3) or not all(parts):
+        return ("error: biokg-schema-path-lookup format is SOURCE_NAME|TARGET_LABEL[|MAX_HOPS].\n"
+                "Example: biokg-schema-path-lookup TARGET_ENTITY|protein")
+    source, target_label = parts[0], parts[1]
+    max_hops = None
+    if len(parts) == 3:
+        try:
+            max_hops = int(parts[2])
+        except (TypeError, ValueError):
+            return f"error: invalid max hops {parts[2]!r}"
+    return _get_backend().schema_path_lookup(source, target_label, max_hops=max_hops)
+
+
 def schema_intent_options() -> dict:
     schema = _load_schema()
     if schema is None:
@@ -539,6 +570,24 @@ def _normalize_entity_query_name(name: str) -> str:
     return text.strip()
 
 
+def _entity_name_candidates(name: str) -> list:
+    """Candidate display-name spellings to try before raw-ID fallback."""
+    text = _normalize_entity_query_name(name)
+    candidates = [text]
+    normalized = text.replace(" ", "_")
+    if normalized != text:
+        candidates.append(normalized)
+    return _dedupe_preserve_order([c for c in candidates if c])
+
+
+def _looks_like_raw_identifier(name: str) -> bool:
+    text = str(name or "").strip()
+    if not text or " " in text:
+        return False
+    return bool(re.search(r"\d", text) or ":" in text)
+
+
+
 # ─── BioCypher schema loader ────────────────────────────────────────────────
 # Parses a BioCypher schema_config.yaml (full or curated subset) and exposes:
 #   entities[label] = { name_prop, all_labels (incl. inherited) }
@@ -564,9 +613,15 @@ class Schema:
             if represented == "node":
                 label = body.get("input_label", name).strip()
                 name_prop = self._resolve_name_property(name)
+                parents = [
+                    self._entity_label(parent)
+                    for parent in _aslist(body.get("is_a"))
+                    if str(parent or "").strip()
+                ]
                 self.entities[label] = {
                     "name_prop": name_prop,
                     "entity_name": name,
+                    "parents": parents,
                 }
             elif represented == "edge":
                 # output_label wins over input_label for Neo4j relationship type.
@@ -706,6 +761,69 @@ class Schema:
                 if target == label and source not in labels:
                     labels.append(source)
         return labels
+
+    def directed_paths_between(self, source_label: str, target_label: str,
+                               max_hops: int = 3) -> list:
+        """Return directed schema paths as lists of (edge, source, target).
+
+        Matching follows `is_a`: an actual node label can use an edge contract
+        declared on one of its schema ancestors, and abstract targets expand to
+        concrete descendant labels before BioKG is queried.
+        """
+        max_hops = max(1, min(int(max_hops or 3), 6))
+        if source_label == target_label:
+            return []
+
+        paths = []
+        queue = [(source_label, [], {source_label})]
+        while queue:
+            current_label, path, seen = queue.pop(0)
+            if len(path) >= max_hops:
+                continue
+            for edge_label, edge in self.edges.items():
+                for schema_source, schema_target in edge.get("pairs", []):
+                    if not self.label_is_a(current_label, schema_source):
+                        continue
+                    next_labels = self.compatible_entity_labels(schema_target)
+                    if target_label in next_labels:
+                        next_labels = [target_label] + [
+                            label for label in next_labels if label != target_label
+                        ]
+                    for next_label in next_labels:
+                        if next_label in seen:
+                            continue
+                        next_path = path + [(edge_label, current_label, next_label)]
+                        if next_label == target_label:
+                            paths.append(next_path)
+                            continue
+                        queue.append((next_label, next_path, seen | {next_label}))
+        paths.sort(key=lambda path: (len(path), " ".join(step[0] for step in path)))
+        return paths
+
+    def label_is_a(self, actual_label: str, schema_label: str) -> bool:
+        if actual_label == schema_label:
+            return True
+        return schema_label in self.ancestors_for(actual_label)
+
+    def ancestors_for(self, label: str) -> set:
+        ancestors = set()
+        queue = list((self.entities.get(label) or {}).get("parents", []))
+        while queue:
+            parent = queue.pop(0)
+            if parent in ancestors:
+                continue
+            ancestors.add(parent)
+            queue.extend((self.entities.get(parent) or {}).get("parents", []))
+        return ancestors
+
+    def compatible_entity_labels(self, schema_label: str) -> list:
+        labels = []
+        for label in self.entities:
+            if self.label_is_a(label, schema_label):
+                labels.append(label)
+        if schema_label in self.entities and schema_label not in labels:
+            labels.append(schema_label)
+        return sorted(labels)
 
     def validate_edge(self, edge_label: str, source_label: str, target_label: str):
         """Return (ok: bool, reason: str)."""
@@ -1056,6 +1174,12 @@ class DisabledBackend:
 
     def schema_neighbor_lookup(self, target_name: str, neighbor_label: str) -> str:
         return f"biokg unavailable ({self._reason}); cannot summarize schema-neighbor annotations"
+
+    def export_schema_neighbor(self, target_name: str, neighbor_label: str, fmt: str = "csv") -> str:
+        return f"biokg unavailable ({self._reason}); cannot export schema-neighbor annotations"
+
+    def schema_path_lookup(self, source_name: str, target_label: str, max_hops: int = None) -> str:
+        return f"biokg unavailable ({self._reason}); cannot summarize schema paths"
 
 
 class Neo4jBackend:
@@ -1825,6 +1949,143 @@ class Neo4jBackend:
             capped=(len(rows) >= max(limit, 1)),
         )
 
+    def export_schema_neighbor(self, target_name: str, neighbor_label: str, fmt: str = "csv") -> str:
+        if self._schema is None:
+            return "error: no BioCypher schema loaded."
+        target_label = self._resolve_label(target_name)
+        if not target_label:
+            return (f"error: target entity {target_name!r} not found in BioKG "
+                    f"(tried properties: {', '.join(self._name_props)}).")
+        resolved_neighbor, edges, _aliases, error = _schema_neighbor_contract(
+            self._schema, target_label, neighbor_label,
+        )
+        if error:
+            return error
+        edge_types = "|".join(f"`{edge}`" for edge in edges)
+        neighbor_name_prop = self._schema.entity_name_prop(resolved_neighbor) or "id"
+        target_name_prop = self._schema.entity_name_prop(target_label) or "id"
+        try:
+            limit = int(os.environ.get("BIOKG_SCHEMA_NEIGHBOR_EXPORT_LIMIT", "100000"))
+        except (TypeError, ValueError):
+            limit = 100000
+        cypher = (
+            f"MATCH (t:`{target_label}`) WHERE toLower(t.{target_name_prop}) = toLower($target) "
+            f"MATCH (t)-[r:{edge_types}]-(n:`{resolved_neighbor}`) "
+            f"RETURN coalesce(t.{target_name_prop}, $target) AS target_name, "
+            f"       type(r) AS edge, labels(n)[0] AS neighbor_label, "
+            f"       coalesce(n.id, '') AS neighbor_id, "
+            f"       coalesce(n.{neighbor_name_prop}, n.id) AS neighbor_name "
+            f"LIMIT {max(limit, 1)}"
+        )
+        try:
+            with self._driver.session(database=self._database) as session:
+                rows = list(session.run(cypher, target=str(target_name).strip()))
+        except Exception as exc:
+            return f"biokg neo4j error: {exc}"
+        export_rows = []
+        for row in rows:
+            export_rows.append({
+                "target_name": row.get("target_name") or str(target_name).strip(),
+                "target_label": target_label,
+                "edge": row.get("edge") or "",
+                "neighbor_label": row.get("neighbor_label") or resolved_neighbor,
+                "neighbor_id": row.get("neighbor_id") or "",
+                "neighbor_name": row.get("neighbor_name") or "",
+            })
+        display = export_rows[0]["target_name"] if export_rows else str(target_name).strip()
+        return _write_schema_neighbor_export(display, target_label, resolved_neighbor, export_rows, fmt)
+
+    def schema_path_lookup(self, source_name: str, target_label: str, max_hops: int = None) -> str:
+        if self._schema is None:
+            return "error: no BioCypher schema loaded."
+        source_label = self._resolve_label(source_name)
+        if not source_label:
+            return (f"error: source entity {source_name!r} not found in BioKG "
+                    f"(tried properties: {', '.join(self._name_props)}).")
+        resolved_target = _schema_label_for_phrase(self._schema, target_label)
+        if not resolved_target:
+            return f"error: target label {target_label!r} is not in the loaded BioCypher schema."
+        try:
+            env_max = int(os.environ.get("BIOKG_SCHEMA_PATH_MAX_HOPS", "3"))
+        except (TypeError, ValueError):
+            env_max = 3
+        hops = max_hops if max_hops is not None else env_max
+        try:
+            hops = int(hops)
+        except (TypeError, ValueError):
+            hops = env_max
+        hops = max(1, min(hops, 6))
+
+        paths = self._schema.directed_paths_between(source_label, resolved_target, max_hops=hops)
+        source_display = str(source_name).strip()
+        if not paths:
+            return (
+                f"I did not find a directed schema path from {source_display} "
+                f"({_friendly_label(source_label)}) to {_friendly_label(resolved_target)} "
+                f"within {hops} hop(s)."
+            )
+        try:
+            limit = int(os.environ.get("BIOKG_SCHEMA_PATH_LOOKUP_LIMIT", "50"))
+        except (TypeError, ValueError):
+            limit = 50
+        limit = max(limit, 1)
+
+        path_results = []
+        capped = False
+        for path in paths:
+            rows, display = self._query_schema_path(source_name, source_label, path, limit)
+            if display:
+                source_display = display
+            if rows:
+                path_results.append((path, rows))
+            if len(rows) >= limit:
+                capped = True
+                break
+
+        return _format_schema_path_lookup_result(
+            source_display, source_label, resolved_target, paths, path_results, capped=capped,
+        )
+
+    def _query_schema_path(self, source_name: str, source_label: str,
+                           path: list, limit: int) -> tuple:
+        source_match = " OR ".join(
+            f"toLower(n0.{p}) = toLower($source_name)" for p in self._name_props
+        )
+        matches = [f"MATCH (n0:`{source_label}`) WHERE {source_match} WITH n0 LIMIT 1"]
+        returns = [
+            f"coalesce({self._neo4j_name_expr('n0')}) AS n0_name"
+        ]
+        for idx, (edge, _step_source, step_target) in enumerate(path):
+            left = f"n{idx}"
+            right = f"n{idx + 1}"
+            matches.append(f"MATCH ({left})-[:`{edge}`]->({right}:`{step_target}`)")
+            returns.append(f"coalesce({self._neo4j_name_expr(right)}) AS {right}_name")
+            returns.append(f"coalesce(toString({right}.id), toString(id({right}))) AS {right}_id")
+        cypher = " ".join(matches) + " RETURN " + ", ".join(returns) + f" LIMIT {int(limit)}"
+        try:
+            with self._driver.session(database=self._database) as session:
+                records = list(session.run(cypher, source_name=str(source_name).strip()))
+        except Exception:
+            return [], ""
+
+        rows = []
+        source_display = ""
+        for record in records:
+            if not source_display:
+                source_display = record.get("n0_name") or str(source_name).strip()
+            row = []
+            for idx, (_edge, _step_source, step_target) in enumerate(path):
+                var = f"n{idx + 1}"
+                node_name = record.get(f"{var}_name") or record.get(f"{var}_id") or ""
+                node_id = record.get(f"{var}_id") or node_name
+                row.append((step_target, str(node_id), str(node_name).replace("_", " ")))
+            rows.append(row)
+        return rows, source_display
+
+    def _neo4j_name_expr(self, var_name: str) -> str:
+        props = [f"{var_name}.{p}" for p in self._name_props]
+        return ", ".join(props + [f"toString({var_name}.id)", f"toString(id({var_name}))"])
+
     def pln_source_aggregate(self, target_name: str, edge_type: str, neighbor_label: str = None) -> str:
         """Cross-source consensus for all edges of EDGE_TYPE incident to TARGET.
 
@@ -2238,10 +2499,7 @@ class MorkBackend:
         try the input as-is AND with that normalization applied.
         Falls back to treating the input as a raw ID if no name match works."""
         name = _normalize_entity_query_name(name)
-        candidates = [name]
-        normalized = name.replace(" ", "_")
-        if normalized != name:
-            candidates.append(normalized)
+        candidates = _entity_name_candidates(name)
 
         for cand in candidates:
             for prop in self._name_props:
@@ -2257,11 +2515,14 @@ class MorkBackend:
                         return parsed
 
         # Fallback: maybe the user passed a raw ID like 'ENSG00000141510'.
-        labels = self._candidate_labels()
-        for label in labels:
-            hits = self._query(f"({label} {name})", "matched")
-            if any(h == "matched" for h in hits):
-                return label, name
+        # Do not treat arbitrary short words as raw IDs; otherwise typos can
+        # look like real disconnected nodes.
+        if _looks_like_raw_identifier(name):
+            labels = self._candidate_labels()
+            for label in labels:
+                hits = self._query(f"({label} {name})", "matched")
+                if any(h == "matched" for h in hits):
+                    return label, name
 
         return None
 
@@ -3434,6 +3695,202 @@ class MorkBackend:
             capped=capped,
         )
 
+    def export_schema_neighbor(self, target_name: str, neighbor_label: str, fmt: str = "csv") -> str:
+        if self._schema is None:
+            return "error: no BioCypher schema loaded."
+        target_entity = self._resolve_name(target_name)
+        if not target_entity:
+            return (f"error: target entity {target_name!r} not found in BioKG "
+                    f"(tried properties: {', '.join(self._name_props)}).")
+        target_label, target_id = target_entity
+        target_display = (self._resolve_id_to_name(target_label, target_id) or target_name).replace("_", " ")
+        resolved_neighbor, edges, _aliases, error = _schema_neighbor_contract(
+            self._schema, target_label, neighbor_label,
+        )
+        if error:
+            return error
+        try:
+            limit = int(os.environ.get("BIOKG_SCHEMA_NEIGHBOR_EXPORT_LIMIT", "100000"))
+        except (TypeError, ValueError):
+            limit = 100000
+        limit = max(limit, 1)
+
+        import uuid
+        rows = []
+        capped = False
+        seen = set()
+        for edge in edges:
+            for direction, pattern in (
+                ("in", f"({edge} ($o_label $o_id) ({target_label} {target_id}))"),
+                ("out", f"({edge} ({target_label} {target_id}) ($o_label $o_id))"),
+            ):
+                tag = f"bioclaw_schema_export_{direction}_{uuid.uuid4().hex[:12]}"
+                raw = self._transform(
+                    patterns=[pattern],
+                    template=f"({tag} $o_label $o_id)",
+                )
+                for line in raw:
+                    s = line.strip()
+                    if not (s.startswith("(") and s.endswith(")")):
+                        continue
+                    inner = s[1:-1].strip()
+                    if not inner.startswith(tag):
+                        continue
+                    parts = inner[len(tag):].strip().split()
+                    if len(parts) < 2:
+                        continue
+                    o_label, o_id = parts[0], " ".join(parts[1:])
+                    if o_label != resolved_neighbor:
+                        continue
+                    key = (edge, o_label, o_id)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    rows.append({
+                        "target_name": target_display,
+                        "target_label": target_label,
+                        "edge": edge,
+                        "neighbor_label": o_label,
+                        "neighbor_id": o_id,
+                        "neighbor_name": (self._resolve_id_to_name(o_label, o_id) or o_id).replace("_", " "),
+                    })
+                    if len(rows) >= limit:
+                        capped = True
+                        break
+                if capped:
+                    break
+            if capped:
+                break
+
+        result = _write_schema_neighbor_export(
+            target_display, target_label, resolved_neighbor, rows, fmt,
+        )
+        if capped:
+            result += f" (limited by BIOKG_SCHEMA_NEIGHBOR_EXPORT_LIMIT={limit})"
+        return result
+
+    def schema_path_lookup(self, source_name: str, target_label: str, max_hops: int = None) -> str:
+        if self._schema is None:
+            return "error: no BioCypher schema loaded."
+        source_entity = self._resolve_name(source_name)
+        if not source_entity:
+            return (f"error: source entity {source_name!r} not found in BioKG "
+                    f"(tried properties: {', '.join(self._name_props)}).")
+        source_label, source_id = source_entity
+        source_display = (self._resolve_id_to_name(source_label, source_id) or source_name).replace("_", " ")
+        resolved_target = _schema_label_for_phrase(self._schema, target_label)
+        if not resolved_target:
+            return f"error: target label {target_label!r} is not in the loaded BioCypher schema."
+        try:
+            env_max = int(os.environ.get("BIOKG_SCHEMA_PATH_MAX_HOPS", "3"))
+        except (TypeError, ValueError):
+            env_max = 3
+        hops = max_hops if max_hops is not None else env_max
+        try:
+            hops = int(hops)
+        except (TypeError, ValueError):
+            hops = env_max
+        hops = max(1, min(hops, 6))
+
+        paths = self._schema.directed_paths_between(source_label, resolved_target, max_hops=hops)
+        if not paths:
+            return (
+                f"I did not find a directed schema path from {source_display} "
+                f"({_friendly_label(source_label)}) to {_friendly_label(resolved_target)} "
+                f"within {hops} hop(s)."
+            )
+        try:
+            limit = int(os.environ.get("BIOKG_SCHEMA_PATH_LOOKUP_LIMIT", "50"))
+        except (TypeError, ValueError):
+            limit = 50
+        limit = max(limit, 1)
+
+        path_results = []
+        capped = False
+        for path in paths:
+            raw_rows = self._query_schema_path(source_label, source_id, path)
+            rows = []
+            seen = set()
+            for nodes in raw_rows:
+                if len(nodes) != len(path):
+                    continue
+                ok = True
+                for node, step in zip(nodes, path):
+                    if node[0] != step[2]:
+                        ok = False
+                        break
+                if not ok:
+                    continue
+                key = tuple(nodes)
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append([
+                    (
+                        label,
+                        node_id,
+                        (self._resolve_id_to_name(label, node_id) or node_id).replace("_", " "),
+                    )
+                    for label, node_id in nodes
+                ])
+                if len(rows) >= limit:
+                    capped = True
+                    break
+            if rows:
+                path_results.append((path, rows))
+            if capped:
+                break
+
+        return _format_schema_path_lookup_result(
+            source_display, source_label, resolved_target, paths, path_results, capped=capped,
+        )
+
+    def _query_schema_path(self, source_label: str, source_id: str, path: list) -> list:
+        tag = f"bioclaw_schema_path_{uuid.uuid4().hex[:12]}"
+        patterns = []
+        node_templates = []
+        for idx, (edge, step_source, step_target) in enumerate(path):
+            if idx == 0:
+                left = f"({source_label} {source_id})"
+            else:
+                left = f"($p{idx - 1}_label $p{idx - 1}_id)"
+            right = f"($p{idx}_label $p{idx}_id)"
+            patterns.append(f"({edge} {left} {right})")
+            node_templates.append(right)
+        template = f"({tag} {' '.join(node_templates)})"
+        raw = self._transform(patterns=patterns, template=template)
+        rows = []
+        for line in raw:
+            nodes = self._parse_tagged_node_row(line, tag)
+            if nodes:
+                rows.append(nodes)
+        return rows
+
+    def _parse_tagged_node_row(self, text: str, tag: str) -> list:
+        s = str(text or "").strip()
+        if not (s.startswith("(") and s.endswith(")")):
+            return []
+        inner = s[1:-1].strip()
+        if not inner.startswith(tag):
+            return []
+        rest = inner[len(tag):].strip()
+        nodes = []
+        depth = 0
+        start = None
+        for idx, ch in enumerate(rest):
+            if ch == "(":
+                if depth == 0:
+                    start = idx
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0 and start is not None:
+                    parsed = self._parse_node(rest[start:idx + 1])
+                    if parsed:
+                        nodes.append(parsed)
+                    start = None
+        return nodes
+
     def pln_source_aggregate(self, target_name: str, edge_type: str, neighbor_label: str = None) -> str:
         """Cross-source consensus for all EDGE_TYPE edges incident to TARGET.
 
@@ -3804,6 +4261,113 @@ def _format_schema_neighbor_lookup_result(target_name: str, target_label: str,
         f"BioKG shows {total}{cap_note} direct annotation(s){count_note}; "
         f"examples include {_human_join(shown)}."
     )
+
+
+def _write_schema_neighbor_export(target_name: str, target_label: str,
+                                  neighbor_label: str, rows: list,
+                                  fmt: str = "csv") -> str:
+    fmt = str(fmt or "csv").strip().lower().lstrip(".")
+    if fmt not in {"csv", "tsv", "json"}:
+        fmt = "csv"
+    out_dir = os.environ.get("BIOCLAW_EXPORT_DIR", "/tmp/bioclaw_exports")
+    os.makedirs(out_dir, exist_ok=True)
+    stem = "_".join(
+        part for part in (
+            "bioclaw",
+            _safe_file_token(target_name),
+            _safe_file_token(neighbor_label),
+            time.strftime("%Y%m%d_%H%M%S", time.gmtime()),
+            uuid.uuid4().hex[:8],
+        )
+        if part
+    )
+    path = os.path.join(out_dir, f"{stem}.{fmt}")
+    fields = [
+        "target_name",
+        "target_label",
+        "edge",
+        "neighbor_label",
+        "neighbor_id",
+        "neighbor_name",
+    ]
+    normalized_rows = []
+    for row in rows:
+        normalized_rows.append({field: str(row.get(field, "")) for field in fields})
+    if fmt == "json":
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(normalized_rows, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+    else:
+        delimiter = "\t" if fmt == "tsv" else ","
+        with open(path, "w", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fields, delimiter=delimiter)
+            writer.writeheader()
+            writer.writerows(normalized_rows)
+    return (
+        f"Exported {len(normalized_rows)} {_friendly_label(neighbor_label)} row(s) for "
+        f"{_clean_display_name(target_name)} ({_friendly_label(target_label)}) to {path}"
+    )
+
+
+def _safe_file_token(value: str) -> str:
+    token = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip())
+    return token.strip("._-")[:80] or "export"
+
+
+def _format_schema_path_lookup_result(source_name: str, source_label: str,
+                                      target_label: str, schema_paths: list,
+                                      path_results: list,
+                                      capped: bool = False) -> str:
+    display = _clean_display_name(source_name)
+    target_friendly = _friendly_label(target_label)
+    if not path_results:
+        path_text = "; ".join(_schema_path_text(path) for path in schema_paths[:3])
+        return (
+            f"BioKG's schema can represent a path from {display} "
+            f"({_friendly_label(source_label)}) to {target_friendly} through {path_text}, "
+            "but this KG snapshot did not return matching path instances for that entity."
+        )
+
+    target_counts = {}
+    examples = []
+    path_names = []
+    for path, rows in path_results:
+        path_names.append(_schema_path_text(path))
+        for row in rows:
+            if not row:
+                continue
+            final_label, final_id, final_name = row[-1]
+            if final_label != target_label:
+                continue
+            clean_final = _clean_display_name(final_name)
+            target_counts[clean_final] = target_counts.get(clean_final, 0) + 1
+            chain = [display] + [_clean_display_name(node[2]) for node in row]
+            examples.append(" -> ".join(chain))
+
+    targets = _readable_examples(list(target_counts), 6)
+    example_text = _human_join(_readable_examples(examples, 3))
+    cap_note = " or more" if capped else ""
+    path_text = "; ".join(_dedupe_preserve_order(path_names)[:3])
+    target_sentence = (
+        f" Target {target_friendly} node(s) include {_human_join(targets)}."
+        if targets else ""
+    )
+    example_sentence = f" Example path(s): {example_text}." if example_text else ""
+    return (
+        f"BioKG found {sum(target_counts.values())}{cap_note} schema-path instance(s) "
+        f"from {display} ({_friendly_label(source_label)}) to {target_friendly} "
+        f"through {path_text}.{target_sentence}{example_sentence}"
+    )
+
+
+def _schema_path_text(path: list) -> str:
+    if not path:
+        return ""
+    pieces = [_friendly_label(path[0][1])]
+    for edge, _source, target in path:
+        pieces.append(edge)
+        pieces.append(_friendly_label(target))
+    return " -> ".join(pieces)
 
 
 def _schema_neighbor_opening(target_name: str, neighbor_label: str, edges: list) -> str:

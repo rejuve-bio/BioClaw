@@ -3,10 +3,6 @@
 # Default policy is intentionally neutral:
 #   1. Use edge-level confidence or normalized score when the KG provides it.
 #   2. Otherwise use default_stv.
-#
-# Do not encode test-graph relationships or source-specific assumptions here.
-# Large KG deployments can mount a separate calibrated reasoning file if they
-# have validated source/evidence reliability priors.
 
 default_stv: [1.0, 0.5]
 action_threshold: 0.5
