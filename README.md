@@ -103,12 +103,6 @@ git clone <repo-url> bioclaw
 cd bioclaw
 ```
 
-If you are working inside this monorepo:
-
-```bash
-cd /Users/a/projects/omegaclaw/bioclaw
-```
-
 ### 2. Create `.env`
 
 ```bash
