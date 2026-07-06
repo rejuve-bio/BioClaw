@@ -1,0 +1,98 @@
+# Schema role policy for BioClaw Symbolic.
+#
+# This file is not a biological schema. It tells BioClaw how to interpret
+# property metadata that already appears in the loaded BioCypher schema.
+# Keep this deployment-configurable so the Python code does not hardcode a
+# fixed view of one small test graph.
+
+edge_property_roles:
+  source:
+    names:
+      - source
+      - data_source
+      - knowledge_source
+      - provided_by
+  score:
+    names:
+      - score
+      - edge_score
+      - confidence
+      - edge_confidence
+      - p_value
+      - q_value
+    suffixes:
+      - _score
+  evidence:
+    names:
+      - evidence
+      - evidence_code
+      - evidence_code_name
+  reference:
+    names:
+      - reference
+      - references
+      - db_reference
+      - pubmed_references
+      - source_url
+  context:
+    names:
+      - biological_context
+      - interaction_context
+      - interaction_type
+      - reactome_pathway
+
+node_property_roles:
+  name:
+    biolink:
+      - name
+      - biolink:name
+      - "biolink: name"
+    names:
+      - name
+    suffixes:
+      - _name
+  id:
+    biolink:
+      - id
+      - biolink:id
+      - "biolink: id"
+    names:
+      - id
+  synonym:
+    biolink:
+      - synonym
+      - biolink:synonym
+      - "biolink: synonym"
+    names:
+      - synonym
+  xref:
+    biolink:
+      - xref
+      - biolink:xref
+      - "biolink: xref"
+    names:
+      - xref
+      - accessions
+  description:
+    biolink:
+      - description
+      - biolink:description
+      - "biolink: description"
+    names:
+      - description
+  source:
+    biolink:
+      - knowledge_source
+      - biolink:knowledge_source
+      - "biolink: knowledge_source"
+    names:
+      - source
+      - data_source
+      - knowledge_source
+  source_url:
+    biolink:
+      - source_web_page
+      - biolink:source_web_page
+      - "biolink: source_web_page"
+    names:
+      - source_url

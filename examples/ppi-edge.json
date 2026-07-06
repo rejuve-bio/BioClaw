@@ -1,0 +1,7 @@
+{
+  "mork": "http://localhost:8037",
+  "namespace": "annotation",
+  "source": "protein:P20645",
+  "edge": "interacts_with",
+  "target": "protein:P51151"
+}

@@ -1,0 +1,78 @@
+# Neutral BioClaw Symbolic reasoning policy.
+#
+# This file does not encode biological relationships. It only controls how
+# packet-local evidence is interpreted when the MORK BioAtomspace provides
+# confidence-bearing annotations.
+
+default_stv: [1.0, 0.5]
+action_threshold: 0.5
+
+# Optional fallback STVs for evidence codes when an edge has no explicit score.
+# These are generic evidence-code reliability priors, not biological
+# relationships. They keep packet assessment from treating every score-missing
+# annotation as equally actionable.
+evidence_code_stv:
+  EXP: [1.0, 0.90]
+  IDA: [1.0, 0.90]
+  IPI: [1.0, 0.85]
+  IMP: [1.0, 0.85]
+  IGI: [1.0, 0.85]
+  IEP: [1.0, 0.65]
+  HTP: [1.0, 0.70]
+  HDA: [1.0, 0.75]
+  HMP: [1.0, 0.75]
+  HGI: [1.0, 0.75]
+  HEP: [1.0, 0.70]
+  IBA: [1.0, 0.70]
+  IBD: [1.0, 0.65]
+  IKR: [1.0, 0.45]
+  IRD: [1.0, 0.45]
+  ISS: [1.0, 0.55]
+  ISO: [1.0, 0.55]
+  ISA: [1.0, 0.50]
+  ISM: [1.0, 0.50]
+  RCA: [1.0, 0.55]
+  TAS: [1.0, 0.80]
+  NAS: [1.0, 0.55]
+  IC: [1.0, 0.70]
+  IEA: [1.0, 0.50]
+  ND: [0.5, 0.10]
+
+# Annotation-name groups below are fallbacks for running without a schema role
+# policy. When a command is run with --schema, BioClaw uses schema-derived roles
+# attached to each evidence packet instead.
+
+# Annotation names that can carry direct confidence values.
+confidence_annotations:
+  - confidence
+  - edge_confidence
+  - staging_confidence
+
+# Annotation names that can carry numeric scores.
+score_annotations:
+  - score
+  - edge_score
+
+# Annotation groups used for audit labels.
+source_annotations:
+  - source
+  - data_source
+  - knowledge_source
+
+evidence_annotations:
+  - evidence
+  - evidence_code
+  - evidence_code_name
+
+reference_annotations:
+  - reference
+  - references
+  - db_reference
+  - pubmed_references
+  - source_url
+
+context_annotations:
+  - biological_context
+  - interaction_context
+  - interaction_type
+  - reactome_pathway
