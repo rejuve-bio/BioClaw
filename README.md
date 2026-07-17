@@ -1,7 +1,30 @@
 # BioClaw
 
 BioClaw is a biology-domain OmegaClaw system for grounded BioKG curation,
-lookup, and evidence reasoning. It runs three OmegaClaw agents over Docker:
+lookup, and evidence reasoning.
+
+## Branch Status
+
+This `main` branch contains the earlier Docker/IRC multi-agent demo:
+Conductor, AssistantOC, and ReasonerOC around a MORK-backed BioKG. It is kept
+as a runnable reference for the conversational prototype.
+
+The current symbolic/evidence-audit work lives on the `symbolic` branch:
+
+```bash
+git switch symbolic
+```
+
+That branch removes the IRC multi-agent overlay and focuses on schema-aware
+MORK BioAtomspace evidence extraction, relation/entity/path audits,
+curator-facing exports, conservative OmegaClaw payload generation, and the
+evaluation paper describing where OmegaClaw PLN/NAL did and did not add value
+on the tested packets. The internal implementation plan is not part of the
+public branch sync.
+
+## Legacy Multi-Agent Demo
+
+The legacy demo runs three OmegaClaw agents over Docker:
 
 - **Conductor**: talks to the user, handles greeting/help, staging approval,
   and coarse specialist routing. It does not execute biology queries itself.
