@@ -1,7 +1,8 @@
 # BioClaw Symbolic
 
-BioClaw Symbolic is a focused OmegaClaw-aligned evidence layer for a MORK
-BioAtomspace.
+BioClaw Symbolic is a focused evidence and audit layer for a MORK
+BioAtomspace, with experimental OmegaClaw payload generation for bounded
+evidence packets.
 
 This branch is intentionally different from the earlier IRC multi-agent demo.
 It removes the conductor/assistant/reasoner overlay and keeps the work centered
@@ -11,7 +12,7 @@ on the part that is not already solved by ordinary assistant systems:
 - extract bounded evidence packets from MORK BioAtomspace;
 - preserve atom-level provenance, score, evidence, context, and references;
 - classify retrieved annotations through schema roles before reasoning;
-- run focused packet-local symbolic assessment over the retrieved packet roles;
+- run focused packet-local evidence assessment over the retrieved packet roles;
 - produce auditable evidence objects for curators and downstream pipelines.
 
 BioClaw does not treat LLM text or workflow memory as biological truth. The
@@ -33,23 +34,22 @@ Planner / CLI / future skill
     |       Retrieves a bounded packet: edge atom + attached source, score,
     |       evidence, reference, and context atoms.
     |
-    +--> Symbolic assessment
-    |       Applies packet-local, schema-role-aware assessment:
-    |       source aggregation, revision over confidence-bearing evidence,
-    |       schema-path trace status, and curation-state labels.
+    +--> Evidence assessment / OmegaClaw payloads
+    |       Applies packet-local, schema-role-aware assessment and emits
+    |       OmegaClaw-compatible payloads only when the packet carries enough
+    |       data-derived support for a symbolic operation.
     |
     +--> Report / export
             Emits JSON evidence objects and concise curator-facing summaries.
 ```
 
-The important constraint is scale: BioClaw should not try to load the full
+The important constraint is scale: BioClaw does not try to load the full
 BioAtomspace into a reasoner. It retrieves a small, schema-valid evidence packet
-and assesses that bounded packet. Real OmegaClaw PLN/NAL integration is planned
-as a separate spike; the current Python assessment layer should not be described
-as authoritative PLN.
-
-See [PLAN.md](PLAN.md) for the implementation roadmap, reasoning semantics, and
-AI Assistant positioning.
+and assesses that bounded packet. The current evaluation found that, for the
+tested MORK packets, the useful layer is schema-aware evidence extraction and
+audit. OmegaClaw PLN/NAL payloads are generated conservatively and are skipped
+when the packet has no data-derived STVs or comparable source-local truth
+values.
 
 ## Repository Layout
 
@@ -57,8 +57,12 @@ AI Assistant positioning.
 bioclaw/
 ├── bioclaw_symbolic/
 │   ├── cli.py          # command-line entrypoint
+│   ├── entity_audit.py # entity-level schema coverage audit
 │   ├── evidence.py     # evidence packet data model and summaries
+│   ├── hypothesis.py   # traceable path/neighborhood hypothesis summaries
 │   ├── mork.py         # MORK export client and packet extraction
+│   ├── omegaclaw.py    # OmegaClaw-compatible payload generation
+│   ├── path_audit.py   # schema-wide path audit helpers
 │   ├── reasoning.py    # packet-local assessment and interim confidence heuristic
 │   ├── schema.py       # BioCypher schema capability registry
 │   └── schema_policy.py # configurable property-role policy
@@ -67,6 +71,8 @@ bioclaw/
 │   └── schema_roles.yaml # schema property-role mapping
 ├── examples/
 │   └── ppi-edge.json   # example exact-edge request
+├── docs/
+│   └── bioclaw_omegaclaw_evaluation.md
 ├── pyproject.toml
 └── README.md
 ```
@@ -163,7 +169,7 @@ properties such as:
 
 ## Run Bounded Packet Assessment
 
-Add `--reason` to compute a small symbolic assessment over the packet:
+Add `--reason` to compute a small evidence assessment over the packet:
 
 ```bash
 PYTHONPATH=. python3 -m bioclaw_symbolic.cli edge \
@@ -283,7 +289,7 @@ PYTHONPATH=. python3 -m bioclaw_symbolic.cli report \
   --top 10
 ```
 
-The report ranks returned edges by symbolic confidence, then source support,
+The report ranks returned edges by packet confidence, then source support,
 reference support, and context support. It renders role-based evidence fields:
 sources, score/confidence values, evidence annotations, references, context,
 and labels. The same command supports `--format markdown` for notes and
@@ -385,13 +391,41 @@ filters schema properties by the observed source/target node labels in the
 retrieved packets. This avoids mixing unrelated properties from another schema
 contract that happens to use the same edge predicate.
 
-## Plan Status
+## Entity And Path Audits
 
-Current implementation covers schema inspection, MORK packet extraction,
-bounded neighborhoods, property audits, schema-path tracing, and packet-local
-assessment. It does not yet run real OmegaClaw PLN/NAL. The next major symbolic
-milestone is one end-to-end spike from a MORK evidence packet into OmegaClaw's
-real symbolic substrate and back into a BioClaw report.
+Use `entity-audit` to inspect which schema relations are actually populated for
+one entity in the loaded MORK BioAtomspace:
+
+```bash
+PYTHONPATH=. python3 -m bioclaw_symbolic.cli entity-audit \
+  --mork http://localhost:8027 \
+  --schema /path/to/biocypher-kg/config/hsa/hsa_schema_config.yaml \
+  --schema-policy config/schema_roles.yaml \
+  --entity TP53 \
+  --entity-type gene \
+  --max-edges-per-relation 50 \
+  --only-supported \
+  --show-missing-summary \
+  --format markdown
+```
+
+Use `path-audit` when you want schema-wide path candidates and coverage checks
+instead of a single entity path.
+
+## OmegaClaw Payload Experiments
+
+The `omega-spike`, `omega-neighborhood`, and `omega-path` commands generate
+OmegaClaw-compatible payloads from bounded MORK packets. These commands are
+deliberately conservative: they represent grounded evidence atoms and only add
+PLN revision candidates when the packet contains multiple comparable
+data-derived truth values. Topology-only paths produce explicit skip states
+instead of artificial confidence claims.
+
+The evaluation paper in
+[`docs/bioclaw_omegaclaw_evaluation.md`](docs/bioclaw_omegaclaw_evaluation.md)
+summarizes the experiments and the current conclusion: BioClaw is useful as a
+schema-aware MORK evidence/audit utility, while OmegaClaw symbolic reasoning did
+not yet add demonstrated value on the tested packets.
 
 ## What Was Removed From The Old System
 
@@ -411,13 +445,14 @@ library if needed.
 ## Current Scope
 
 This branch is the foundation, not the final product. The immediate milestones
-are:
+covered here are:
 
 1. schema capability registry;
 2. MORK evidence packet extraction;
 3. exact-edge source/provenance audit;
 4. bounded packet-local assessment over extracted evidence;
 5. JSON/CSV exports for downstream analysis;
-6. real OmegaClaw PLN/NAL integration spike over one bounded packet;
-7. validation against a small hand-audited gold set;
-8. later OmegaClaw skill integration over these functions.
+6. entity-level schema coverage audit;
+7. schema-path tracing and path audit;
+8. conservative OmegaClaw payload generation;
+9. evaluation of where symbolic reasoning did and did not add value.
