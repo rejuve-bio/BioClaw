@@ -285,11 +285,6 @@ class MorkClient:
                 return parsed
             return self.resolve_entity(parsed.identifier, registry, parsed.label)
 
-        if label and self._looks_like_raw_identifier(name):
-            candidate = EntityRef(label, name)
-            if self.atom_exists(candidate.atom()):
-                return candidate
-
         name_properties = [prop for prop in registry.name_properties() if prop != "id"]
         for candidate in self._entity_name_candidates(name, registry):
             for prop in name_properties:
@@ -301,6 +296,11 @@ class MorkClient:
                 resolved = self._parse_resolve_rows(rows, tag, allowed_labels)
                 if resolved:
                     return resolved[0]
+
+        if label and self._looks_like_raw_identifier(name):
+            candidate = EntityRef(label, name)
+            if self.atom_exists(candidate.atom()):
+                return candidate
 
         if self._looks_like_raw_identifier(name):
             labels = [label] if label else sorted(allowed_labels)

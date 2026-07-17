@@ -3,6 +3,7 @@
 __all__ = [
     "evidence",
     "mork",
+    "omegaclaw",
     "reasoning",
     "schema",
 ]

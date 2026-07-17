@@ -8,18 +8,32 @@ from pathlib import Path
 from typing import Any
 
 from .audit import property_audit
+from .entity_audit import build_entity_audit, render_entity_audit
 from .evidence import EntityRef
+from .hypothesis import build_hypothesis_candidate, render_hypotheses
 from .mork import MorkClient
+from .omegaclaw import omega_neighborhood_payload, omega_path_payload, omega_revision_probe, omega_spike_payload
+from .path_audit import build_path_audit, render_path_audit
 from .reasoning import load_policy, neighborhood_assessment, packet_assessment
-from .report import render_report, report_dict
+from .report import evidence_cards_dict, render_evidence_cards, render_report, report_dict
 from .schema import SchemaRegistry
-from .schema_path import find_schema_paths
+from .schema_path import PathInstance, find_schema_paths
 
 DEFAULT_SCHEMA_POLICY = "config/schema_roles.yaml"
 
 
 def _print_json(data: Any) -> None:
     print(json.dumps(data, indent=2, sort_keys=True))
+
+
+def _omega_output_text(result, output_format: str) -> str:
+    if output_format == "metta":
+        return result.metta_program
+    if output_format == "skill":
+        return result.payload["omega_payload"]["omega_skill_call"]
+    if output_format == "mock-test":
+        return result.payload["omega_payload"]["omega_mock_test"]
+    return json.dumps(result.payload, indent=2, sort_keys=True) + "\n"
 
 
 def _packet_assessments_by_edge(neighborhood, policy: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
@@ -173,6 +187,88 @@ def cmd_edge(args: argparse.Namespace) -> int:
     return 0
 
 
+def _exact_packet_from_args(args: argparse.Namespace):
+    client = _client(args)
+    registry = SchemaRegistry.from_file(args.schema, args.schema_policy) if args.schema else None
+    source = _resolve_entity_arg(args.source, client, registry, args.source_type) if registry else EntityRef.parse(args.source)
+    target = _resolve_entity_arg(args.target, client, registry, args.target_type) if registry else EntityRef.parse(args.target)
+    annotations = registry.edge_annotation_names(args.edge, source.label, target.label) if registry else []
+    annotation_roles = registry.edge_annotation_roles(args.edge, source.label, target.label) if registry else {}
+    packet = client.evidence_packet(
+        edge_type=args.edge,
+        source=source,
+        target=target,
+        annotations=annotations,
+        annotation_roles=annotation_roles,
+    )
+    if args.include_node_details:
+        if registry is None:
+            raise ValueError("--schema is required with --include-node-details")
+        packet = client.enrich_packet_nodes(packet, registry)
+    return packet
+
+
+def cmd_omega_spike(args: argparse.Namespace) -> int:
+    packet = _exact_packet_from_args(args)
+    policy = load_policy(args.reasoning)
+    result = omega_spike_payload(
+        packet,
+        policy,
+        claim_id=args.claim_id,
+        invoke_engine=args.invoke_engine,
+        engine_command=args.engine_command,
+        timeout=args.engine_timeout,
+    )
+    if args.export:
+        target = Path(args.export)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(_omega_output_text(result, args.format))
+        if args.format == "mock-test":
+            print(f"wrote OmegaClaw mock test to {target}")
+            return 0
+    if args.format in {"metta", "skill", "mock-test"}:
+        print(_omega_output_text(result, args.format), end="")
+    else:
+        _print_json(result.payload)
+    return 0
+
+
+def _stv_arg(value: str) -> tuple[float, float]:
+    parts = value.split(",", 1)
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError("STV must be strength,confidence")
+    try:
+        strength = float(parts[0])
+        confidence = float(parts[1])
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("STV values must be numeric") from exc
+    if not (0.0 <= strength <= 1.0 and 0.0 <= confidence <= 1.0):
+        raise argparse.ArgumentTypeError("STV values must be in [0, 1]")
+    return strength, confidence
+
+
+def cmd_omega_probe(args: argparse.Namespace) -> int:
+    result = omega_revision_probe(
+        first=args.first_stv,
+        second=args.second_stv,
+        invoke_engine=args.invoke_engine,
+        engine_command=args.engine_command,
+        timeout=args.engine_timeout,
+    )
+    if args.export:
+        target = Path(args.export)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(_omega_output_text(result, args.format))
+        if args.format == "mock-test":
+            print(f"wrote OmegaClaw mock test to {target}")
+            return 0
+    if args.format in {"metta", "skill", "mock-test"}:
+        print(_omega_output_text(result, args.format), end="")
+    else:
+        _print_json(result.payload)
+    return 0
+
+
 def cmd_neighborhood(args: argparse.Namespace) -> int:
     client = _client(args)
     registry = SchemaRegistry.from_file(args.schema, args.schema_policy) if args.schema else None
@@ -261,6 +357,56 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_evidence_cards(args: argparse.Namespace) -> int:
+    raw_neighborhood, neighborhood = _retrieve_neighborhood(args)
+    policy = load_policy(args.reasoning)
+    if args.format == "json":
+        output = json.dumps(evidence_cards_dict(neighborhood, raw_neighborhood, policy, top=args.top), indent=2, sort_keys=True) + "\n"
+    else:
+        output = render_evidence_cards(
+            neighborhood,
+            raw_neighborhood,
+            policy,
+            top=args.top,
+            output_format=args.format,
+        )
+    if args.export:
+        target = Path(args.export)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(output)
+        print(f"wrote evidence cards to {target}")
+        return 0
+    print(output, end="")
+    return 0
+
+
+def cmd_omega_neighborhood(args: argparse.Namespace) -> int:
+    raw_neighborhood, neighborhood = _retrieve_neighborhood(args)
+    policy = load_policy(args.reasoning)
+    result = omega_neighborhood_payload(
+        neighborhood,
+        raw_neighborhood,
+        policy,
+        top=args.top,
+        neighborhood_id=args.neighborhood_id,
+        invoke_engine=args.invoke_engine,
+        engine_command=args.engine_command,
+        timeout=args.engine_timeout,
+    )
+    if args.export:
+        target = Path(args.export)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(_omega_output_text(result, args.format))
+        if args.format == "mock-test":
+            print(f"wrote OmegaClaw mock test to {target}")
+            return 0
+    if args.format in {"metta", "skill", "mock-test"}:
+        print(_omega_output_text(result, args.format), end="")
+    else:
+        _print_json(result.payload)
+    return 0
+
+
 def cmd_schema_path(args: argparse.Namespace) -> int:
     registry = SchemaRegistry.from_file(args.schema, args.schema_policy)
     client = _client(args) if args.mork else None
@@ -334,6 +480,196 @@ def cmd_schema_path(args: argparse.Namespace) -> int:
     return 0
 
 
+def _path_instances_from_args(args: argparse.Namespace):
+    registry = SchemaRegistry.from_file(args.schema, args.schema_policy)
+    client = _client(args)
+    start = _resolve_entity_arg(args.entity, client, registry, args.start_type)
+    start_type = args.start_type or start.label
+    paths = find_schema_paths(
+        registry,
+        start_type=start_type,
+        target_type=args.target_type,
+        max_depth=args.max_depth,
+        max_paths=args.max_paths,
+    )
+    candidates = []
+    traces = []
+    for schema_path in paths:
+        trace = client.path_trace(
+            schema_path=schema_path,
+            registry=registry,
+            start=start,
+            limit=args.instances_per_path,
+        )
+        traces.append(trace)
+        instances = [
+            PathInstance(
+                schema_path=schema_path,
+                nodes=tuple(EntityRef(node["label"], node["id"]) for node in item.get("nodes", [])),
+            )
+            for item in trace.get("instances", [])
+        ]
+        for instance in instances:
+            candidates.append(instance)
+    return start, paths, candidates, traces
+
+
+def _edge_packets_for_instance(client: MorkClient, registry: SchemaRegistry, instance: PathInstance):
+    packets = []
+    for index, step in enumerate(instance.schema_path.steps):
+        source = instance.nodes[index]
+        target = instance.nodes[index + 1]
+        annotations = registry.edge_annotation_names(step.edge_label, source.label, target.label)
+        annotation_roles = registry.edge_annotation_roles(step.edge_label, source.label, target.label)
+        packets.append(
+            client.enrich_packet_nodes(
+                client.evidence_packet(
+                    edge_type=step.edge_label,
+                    source=source,
+                    target=target,
+                    annotations=annotations,
+                    annotation_roles=annotation_roles,
+                ),
+                registry,
+            )
+        )
+    return packets
+
+
+def cmd_omega_path(args: argparse.Namespace) -> int:
+    _, paths, instances, traces = _path_instances_from_args(args)
+    if not paths:
+        raise ValueError(
+            f"schema has no path from {args.start_type or args.entity} to {args.target_type} "
+            f"within depth {args.max_depth}"
+        )
+    if not instances:
+        signatures = "; ".join(path.signature() for path in paths[:5])
+        diagnostics = []
+        for trace in traces[:3]:
+            blocked = trace.get("blocked_at_step")
+            steps = trace.get("steps", [])
+            if blocked is None:
+                step_text = "not blocked, but no full instance returned"
+            elif blocked == 0:
+                step_text = "start label did not match schema path"
+            elif 0 < blocked <= len(steps):
+                step = steps[blocked - 1]
+                step_text = (
+                    f"blocked at step {blocked} {step.get('edge_label')} "
+                    f"from {step.get('input_paths')} input path(s) to "
+                    f"{step.get('output_paths')} output path(s)"
+                )
+            else:
+                step_text = f"blocked at step {blocked}"
+            diagnostics.append(
+                f"{trace.get('schema_path', {}).get('signature')}: "
+                f"start_atom_exists={trace.get('start_atom_exists')}; "
+                f"node_labels={','.join(trace.get('node_labels', []))}; "
+                f"{step_text}"
+            )
+        raise ValueError(
+            "schema path(s) exist, but MORK returned no path instances for this start entity. "
+            f"Schema paths checked: {signatures}. "
+            f"Diagnostics: {' | '.join(diagnostics)}"
+        )
+    if args.instance_index < 0 or args.instance_index >= len(instances):
+        raise ValueError(
+            f"--instance-index {args.instance_index} is out of range for "
+            f"{len(instances)} retrieved instance(s)"
+        )
+    policy = load_policy(args.reasoning)
+    result = omega_path_payload(
+        instances[args.instance_index],
+        policy,
+        path_id=args.path_id,
+        invoke_engine=args.invoke_engine,
+        engine_command=args.engine_command,
+        timeout=args.engine_timeout,
+    )
+    if args.export:
+        target = Path(args.export)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(_omega_output_text(result, args.format))
+        if args.format == "mock-test":
+            print(f"wrote OmegaClaw mock test to {target}")
+            return 0
+    if args.format in {"metta", "skill", "mock-test"}:
+        print(_omega_output_text(result, args.format), end="")
+    else:
+        _print_json(result.payload)
+    return 0
+
+
+def cmd_hypotheses(args: argparse.Namespace) -> int:
+    registry = SchemaRegistry.from_file(args.schema, args.schema_policy)
+    client = _client(args)
+    start = _resolve_entity_arg(args.entity, client, registry, args.start_type)
+    start_type = args.start_type or start.label
+    paths = find_schema_paths(
+        registry,
+        start_type=start_type,
+        target_type=args.target_type,
+        max_depth=args.max_depth,
+        max_paths=args.max_paths,
+    )
+    policy = load_policy(args.reasoning)
+    candidates = []
+    traces = []
+    for schema_path in paths:
+        trace = client.path_trace(
+            schema_path=schema_path,
+            registry=registry,
+            start=start,
+            limit=args.instances_per_path,
+        )
+        traces.append(trace)
+        for item in trace.get("instances", []):
+            instance = PathInstance(
+                schema_path=schema_path,
+                nodes=tuple(EntityRef(node["label"], node["id"]) for node in item.get("nodes", [])),
+            )
+            packets = _edge_packets_for_instance(client, registry, instance)
+            candidates.append(build_hypothesis_candidate(instance, packets, policy))
+            if len(candidates) >= args.top:
+                break
+        if len(candidates) >= args.top:
+            break
+
+    data = {
+        "start": {"label": start.label, "id": start.identifier, "schema_type": start_type},
+        "target_type": args.target_type,
+        "schema_path_count": len(paths),
+        "hypothesis_count": len(candidates),
+        "hypotheses": [candidate.to_dict() for candidate in candidates],
+        "retrieval": {
+            "instances_per_path": args.instances_per_path,
+            "top": args.top,
+            "bounded": True,
+            "empty_traces": [
+                trace
+                for trace in traces
+                if not trace.get("instances")
+            ][:3],
+        },
+    }
+    if args.format == "json":
+        output = json.dumps(data, indent=2, sort_keys=True) + "\n"
+    else:
+        output = render_hypotheses(candidates, output_format=args.format)
+        if not candidates:
+            signatures = "; ".join(path.signature() for path in paths[:5]) or "none"
+            output += f"No hypothesis candidates were built. Schema paths checked: {signatures}\n"
+    if args.export:
+        target = Path(args.export)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(output)
+        print(f"wrote hypothesis candidates to {target}")
+        return 0
+    print(output, end="")
+    return 0
+
+
 def cmd_audit_properties(args: argparse.Namespace) -> int:
     client = _client(args)
     registry = SchemaRegistry.from_file(args.schema, args.schema_policy)
@@ -348,6 +684,99 @@ def cmd_audit_properties(args: argparse.Namespace) -> int:
     observed = client.observed_neighborhood_annotations(neighborhood, sample_values=args.sample_values)
     audit = property_audit(neighborhood, registry, observed)
     _print_json(audit.to_dict())
+    return 0
+
+
+def cmd_entity_audit(args: argparse.Namespace) -> int:
+    client = _client(args)
+    registry = SchemaRegistry.from_file(args.schema, args.schema_policy)
+    entity = _resolve_entity_arg(args.entity, client, registry, args.entity_type)
+    schema_type = args.entity_type or entity.label
+    audit = build_entity_audit(
+        client,
+        registry,
+        entity,
+        schema_type,
+        load_policy(args.reasoning),
+        max_edges_per_relation=args.max_edges_per_relation,
+    )
+    if args.format == "json":
+        data = audit.to_dict()
+        if args.only_supported:
+            data["relations"] = [
+                relation
+                for relation in data["relations"]
+                if relation["edge_count"] > 0
+            ]
+        if args.show_missing_summary:
+            missing = [
+                relation["schema_signature"]
+                for relation in audit.to_dict()["relations"]
+                if relation["edge_count"] == 0
+            ]
+            data["missing_summary"] = {
+                "count": len(missing),
+                "schema_signatures": missing,
+            }
+        output = json.dumps(data, indent=2, sort_keys=True) + "\n"
+    else:
+        output = render_entity_audit(
+            audit,
+            output_format=args.format,
+            only_supported=args.only_supported,
+            show_missing_summary=args.show_missing_summary,
+        )
+    if args.export:
+        target = Path(args.export)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(output)
+        print(f"wrote entity audit to {target}")
+        return 0
+    print(output, end="")
+    return 0
+
+
+def cmd_path_audit(args: argparse.Namespace) -> int:
+    if not args.target_type and not args.all_target_types:
+        raise ValueError("provide --target-type or --all-target-types")
+    client = _client(args)
+    registry = SchemaRegistry.from_file(args.schema, args.schema_policy)
+    start = _resolve_entity_arg(args.entity, client, registry, args.start_type)
+    start_type = args.start_type or start.label
+    audit = build_path_audit(
+        client,
+        registry,
+        start,
+        start_type,
+        load_policy(args.reasoning),
+        target_type=args.target_type,
+        all_target_types=args.all_target_types,
+        max_depth=args.max_depth,
+        max_paths_per_target=args.max_paths_per_target,
+        instances_per_path=args.instances_per_path,
+        candidates_per_path=args.candidates_per_path,
+    )
+    if args.only_populated:
+        entries = [entry for entry in audit.to_dict()["entries"] if entry["instance_count"] > 0]
+        data = audit.to_dict()
+        data["entries"] = entries
+    else:
+        data = audit.to_dict()
+    if args.format == "json":
+        output = json.dumps(data, indent=2, sort_keys=True) + "\n"
+    else:
+        output = render_path_audit(
+            audit,
+            output_format=args.format,
+            show_blocked=args.show_blocked,
+        )
+    if args.export:
+        target = Path(args.export)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(output)
+        print(f"wrote path audit to {target}")
+        return 0
+    print(output, end="")
     return 0
 
 
@@ -377,6 +806,37 @@ def build_parser() -> argparse.ArgumentParser:
     edge.add_argument("--reason", action="store_true", help="add bounded symbolic assessment")
     edge.add_argument("--reasoning", default="config/reasoning.yaml", help="reasoning policy YAML")
     edge.set_defaults(func=cmd_edge)
+
+    omega = sub.add_parser("omega-spike", help="marshal one MORK packet into an OmegaClaw MeTTa/STV spike payload")
+    omega.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8037")
+    omega.add_argument("--namespace", default="auto", help="MORK namespace wrapper; default auto tries annotation, default, then raw; use '-' for none")
+    omega.add_argument("--source", required=True, help="source entity as label:id, or a display name when --schema is supplied")
+    omega.add_argument("--source-type", help="optional schema/node label used to constrain source name resolution")
+    omega.add_argument("--edge", required=True, help="edge predicate, e.g. interacts_with")
+    omega.add_argument("--target", required=True, help="target entity as label:id, or a display name when --schema is supplied")
+    omega.add_argument("--target-type", help="optional schema/node label used to constrain target name resolution")
+    omega.add_argument("--timeout", type=int, default=30)
+    omega.add_argument("--schema", help="BioCypher schema YAML, required for --include-node-details")
+    omega.add_argument("--schema-policy", default=DEFAULT_SCHEMA_POLICY, help="schema role policy YAML")
+    omega.add_argument("--include-node-details", action="store_true", help="enrich source/target nodes using schema-selected node properties")
+    omega.add_argument("--reasoning", default="config/reasoning.yaml", help="reasoning policy YAML")
+    omega.add_argument("--claim-id", help="optional MeTTa claim id")
+    omega.add_argument("--invoke-engine", action="store_true", help="try to execute the generated payload with the local MeTTa/OmegaClaw runtime")
+    omega.add_argument("--engine-command", default="metta", help="command used with --invoke-engine; default: metta")
+    omega.add_argument("--engine-timeout", type=int, default=30, help="engine execution timeout in seconds")
+    omega.add_argument("--export", help="write the spike payload to a file")
+    omega.add_argument("--format", choices=["json", "metta", "skill", "mock-test"], default="json", help="output/export format; skill is the OmegaClaw agent-loop payload, mock-test emits a pytest harness")
+    omega.set_defaults(func=cmd_omega_spike)
+
+    omega_probe = sub.add_parser("omega-probe", help="run or export a controlled OmegaClaw PLN revision probe")
+    omega_probe.add_argument("--first-stv", type=_stv_arg, default=(0.4, 0.4), help="first STV as strength,confidence; default 0.4,0.4")
+    omega_probe.add_argument("--second-stv", type=_stv_arg, default=(0.8, 0.8), help="second STV as strength,confidence; default 0.8,0.8")
+    omega_probe.add_argument("--invoke-engine", action="store_true", help="try to execute the generated probe with the local MeTTa/OmegaClaw runtime")
+    omega_probe.add_argument("--engine-command", default="metta", help="command used with --invoke-engine; default: metta")
+    omega_probe.add_argument("--engine-timeout", type=int, default=30, help="engine execution timeout in seconds")
+    omega_probe.add_argument("--export", help="write the probe payload to a file")
+    omega_probe.add_argument("--format", choices=["json", "metta", "skill", "mock-test"], default="json", help="output/export format; skill is the OmegaClaw agent-loop payload, mock-test emits a pytest harness")
+    omega_probe.set_defaults(func=cmd_omega_probe)
 
     neighborhood = sub.add_parser("neighborhood", help="extract incident edge evidence packets from MORK")
     neighborhood.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8037")
@@ -418,6 +878,50 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--reasoning", default="config/reasoning.yaml", help="reasoning policy YAML")
     report.set_defaults(func=cmd_report)
 
+    cards = sub.add_parser("evidence-cards", help="render curator-facing evidence cards from a ranked neighborhood")
+    cards.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8037")
+    cards.add_argument("--namespace", default="auto", help="MORK namespace wrapper; default auto tries annotation, default, then raw; use '-' for none")
+    cards.add_argument("--schema", required=True, help="BioCypher schema YAML")
+    cards.add_argument("--schema-policy", default=DEFAULT_SCHEMA_POLICY, help="schema role policy YAML")
+    cards.add_argument("--entity", required=True, help="focus entity as label:id, or a display name")
+    cards.add_argument("--entity-type", help="optional schema/node label used to constrain entity name resolution")
+    cards.add_argument("--edge", required=True, help="edge predicate, e.g. interacts_with")
+    cards.add_argument("--direction", choices=["incoming", "outgoing", "both"], default="both")
+    cards.add_argument("--limit", type=int, default=100, help="backward-compatible retrieval cap")
+    cards.add_argument("--max-total", type=int, help="maximum candidate edges to retrieve/process; overrides --limit")
+    cards.add_argument("--timeout", type=int, default=30)
+    cards.add_argument("--include-node-details", action="store_true", help="enrich source/target nodes using schema-selected node properties")
+    cards.add_argument("--only-multisource", action="store_true", help="include only edges with more than one source annotation")
+    cards.add_argument("--top", type=int, default=20, help="number of evidence cards to show")
+    cards.add_argument("--format", choices=["text", "markdown", "json", "csv"], default="text", help="card output format")
+    cards.add_argument("--export", help="write evidence cards to a file")
+    cards.add_argument("--reasoning", default="config/reasoning.yaml", help="reasoning policy YAML")
+    cards.set_defaults(func=cmd_evidence_cards)
+
+    omega_neighborhood = sub.add_parser("omega-neighborhood", help="marshal a bounded neighborhood into OmegaClaw curation-state atoms")
+    omega_neighborhood.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8037")
+    omega_neighborhood.add_argument("--namespace", default="auto", help="MORK namespace wrapper; default auto tries annotation, default, then raw; use '-' for none")
+    omega_neighborhood.add_argument("--schema", required=True, help="BioCypher schema YAML")
+    omega_neighborhood.add_argument("--schema-policy", default=DEFAULT_SCHEMA_POLICY, help="schema role policy YAML")
+    omega_neighborhood.add_argument("--entity", required=True, help="focus entity as label:id, or a display name")
+    omega_neighborhood.add_argument("--entity-type", help="optional schema/node label used to constrain entity name resolution")
+    omega_neighborhood.add_argument("--edge", required=True, help="edge predicate, e.g. interacts_with")
+    omega_neighborhood.add_argument("--direction", choices=["incoming", "outgoing", "both"], default="both")
+    omega_neighborhood.add_argument("--limit", type=int, default=100, help="backward-compatible retrieval cap")
+    omega_neighborhood.add_argument("--max-total", type=int, help="maximum candidate edges to retrieve/process; overrides --limit")
+    omega_neighborhood.add_argument("--timeout", type=int, default=30)
+    omega_neighborhood.add_argument("--include-node-details", action="store_true", help="enrich source/target nodes using schema-selected node properties")
+    omega_neighborhood.add_argument("--only-multisource", action="store_true", help="include only edges with more than one source annotation")
+    omega_neighborhood.add_argument("--top", type=int, default=20, help="number of ranked edges to include in symbolic payload")
+    omega_neighborhood.add_argument("--reasoning", default="config/reasoning.yaml", help="reasoning policy YAML")
+    omega_neighborhood.add_argument("--neighborhood-id", help="optional MeTTa neighborhood id")
+    omega_neighborhood.add_argument("--invoke-engine", action="store_true", help="try to execute the generated payload with the local MeTTa/OmegaClaw runtime")
+    omega_neighborhood.add_argument("--engine-command", default="metta", help="command used with --invoke-engine; default: metta")
+    omega_neighborhood.add_argument("--engine-timeout", type=int, default=30, help="engine execution timeout in seconds")
+    omega_neighborhood.add_argument("--export", help="write the neighborhood OmegaClaw payload to a file")
+    omega_neighborhood.add_argument("--format", choices=["json", "metta", "skill", "mock-test"], default="json", help="output/export format; skill is the OmegaClaw agent-loop payload, mock-test emits a pytest harness")
+    omega_neighborhood.set_defaults(func=cmd_omega_neighborhood)
+
     schema_path = sub.add_parser("schema-path", help="find schema-valid paths and optional MORK path instances")
     schema_path.add_argument("--schema", required=True, help="BioCypher schema YAML")
     schema_path.add_argument("--schema-policy", default=DEFAULT_SCHEMA_POLICY, help="schema role policy YAML")
@@ -433,6 +937,83 @@ def build_parser() -> argparse.ArgumentParser:
     schema_path.add_argument("--timeout", type=int, default=30)
     schema_path.add_argument("--format", choices=["text", "json"], default="text", help="output format")
     schema_path.set_defaults(func=cmd_schema_path)
+
+    omega_path = sub.add_parser("omega-path", help="marshal a MORK schema-path instance into OmegaClaw PLN path-support atoms")
+    omega_path.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8027")
+    omega_path.add_argument("--namespace", default="auto", help="MORK namespace wrapper; default auto tries annotation, default, then raw; use '-' for none")
+    omega_path.add_argument("--schema", required=True, help="BioCypher schema YAML")
+    omega_path.add_argument("--schema-policy", default=DEFAULT_SCHEMA_POLICY, help="schema role policy YAML")
+    omega_path.add_argument("--entity", required=True, help="start entity as label:id, or a display name")
+    omega_path.add_argument("--start-type", help="schema start type; defaults to the resolved entity label")
+    omega_path.add_argument("--target-type", required=True, help="target schema node type, e.g. protein, pathway, disease")
+    omega_path.add_argument("--max-depth", type=int, default=3, help="maximum schema path length")
+    omega_path.add_argument("--max-paths", type=int, default=20, help="maximum schema paths to inspect")
+    omega_path.add_argument("--instances-per-path", type=int, default=20, help="maximum MORK instances per schema path")
+    omega_path.add_argument("--instance-index", type=int, default=0, help="which retrieved path instance to marshal")
+    omega_path.add_argument("--timeout", type=int, default=30)
+    omega_path.add_argument("--reasoning", default="config/reasoning.yaml", help="reasoning policy YAML")
+    omega_path.add_argument("--path-id", help="optional MeTTa path id")
+    omega_path.add_argument("--invoke-engine", action="store_true", help="try to execute the generated payload with the local MeTTa/OmegaClaw runtime")
+    omega_path.add_argument("--engine-command", default="metta", help="command used with --invoke-engine; default: metta")
+    omega_path.add_argument("--engine-timeout", type=int, default=30, help="engine execution timeout in seconds")
+    omega_path.add_argument("--export", help="write the path OmegaClaw payload to a file")
+    omega_path.add_argument("--format", choices=["json", "metta", "skill", "mock-test"], default="json", help="output/export format; skill is the OmegaClaw agent-loop payload, mock-test emits a pytest harness")
+    omega_path.set_defaults(func=cmd_omega_path)
+
+    hypotheses = sub.add_parser("hypotheses", help="derive traceable curator-review hypotheses from schema-path instances")
+    hypotheses.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8027")
+    hypotheses.add_argument("--namespace", default="auto", help="MORK namespace wrapper; default auto tries annotation, default, then raw; use '-' for none")
+    hypotheses.add_argument("--schema", required=True, help="BioCypher schema YAML")
+    hypotheses.add_argument("--schema-policy", default=DEFAULT_SCHEMA_POLICY, help="schema role policy YAML")
+    hypotheses.add_argument("--entity", required=True, help="start entity as label:id, or a display name")
+    hypotheses.add_argument("--start-type", help="schema start type; defaults to the resolved entity label")
+    hypotheses.add_argument("--target-type", required=True, help="target schema node type, e.g. protein, pathway, disease")
+    hypotheses.add_argument("--max-depth", type=int, default=3, help="maximum schema path length")
+    hypotheses.add_argument("--max-paths", type=int, default=20, help="maximum schema paths to inspect")
+    hypotheses.add_argument("--instances-per-path", type=int, default=20, help="maximum MORK instances per schema path")
+    hypotheses.add_argument("--top", type=int, default=10, help="maximum hypothesis candidates to emit")
+    hypotheses.add_argument("--timeout", type=int, default=30)
+    hypotheses.add_argument("--reasoning", default="config/reasoning.yaml", help="reasoning policy YAML")
+    hypotheses.add_argument("--export", help="write hypothesis candidates to a file")
+    hypotheses.add_argument("--format", choices=["text", "markdown", "json"], default="text", help="output/export format")
+    hypotheses.set_defaults(func=cmd_hypotheses)
+
+    entity_audit = sub.add_parser("entity-audit", help="audit all schema relations incident to one entity in MORK")
+    entity_audit.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8027")
+    entity_audit.add_argument("--namespace", default="auto", help="MORK namespace wrapper; default auto tries annotation, default, then raw; use '-' for none")
+    entity_audit.add_argument("--schema", required=True, help="BioCypher schema YAML")
+    entity_audit.add_argument("--schema-policy", default=DEFAULT_SCHEMA_POLICY, help="schema role policy YAML")
+    entity_audit.add_argument("--entity", required=True, help="entity as label:id, or a display name")
+    entity_audit.add_argument("--entity-type", help="schema/node label used to constrain entity name resolution")
+    entity_audit.add_argument("--max-edges-per-relation", type=int, default=50, help="bounded retrieval cap per schema relation")
+    entity_audit.add_argument("--only-supported", action="store_true", help="render/export only relations with at least one matching edge")
+    entity_audit.add_argument("--show-missing-summary", action="store_true", help="summarize missing schema relations instead of relying on full relation listing")
+    entity_audit.add_argument("--timeout", type=int, default=30)
+    entity_audit.add_argument("--reasoning", default="config/reasoning.yaml", help="reasoning policy YAML")
+    entity_audit.add_argument("--export", help="write entity audit to a file")
+    entity_audit.add_argument("--format", choices=["text", "markdown", "json"], default="text", help="output/export format")
+    entity_audit.set_defaults(func=cmd_entity_audit)
+
+    path_audit = sub.add_parser("path-audit", help="audit schema-valid paths from one entity to one or more target types")
+    path_audit.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8027")
+    path_audit.add_argument("--namespace", default="auto", help="MORK namespace wrapper; default auto tries annotation, default, then raw; use '-' for none")
+    path_audit.add_argument("--schema", required=True, help="BioCypher schema YAML")
+    path_audit.add_argument("--schema-policy", default=DEFAULT_SCHEMA_POLICY, help="schema role policy YAML")
+    path_audit.add_argument("--entity", required=True, help="start entity as label:id, or a display name")
+    path_audit.add_argument("--start-type", help="schema start type; defaults to the resolved entity label")
+    path_audit.add_argument("--target-type", help="target schema node type, e.g. protein, pathway, disease")
+    path_audit.add_argument("--all-target-types", action="store_true", help="inspect schema paths from the start type to every other node type")
+    path_audit.add_argument("--max-depth", type=int, default=3, help="maximum schema path length")
+    path_audit.add_argument("--max-paths-per-target", type=int, default=10, help="maximum schema paths to inspect per target type")
+    path_audit.add_argument("--instances-per-path", type=int, default=10, help="maximum MORK instances per schema path")
+    path_audit.add_argument("--candidates-per-path", type=int, default=3, help="maximum traceable candidates to render per populated path")
+    path_audit.add_argument("--only-populated", action="store_true", help="in JSON output, include only paths with instances")
+    path_audit.add_argument("--show-blocked", action="store_true", help="include blocked schema paths in text/markdown output")
+    path_audit.add_argument("--timeout", type=int, default=30)
+    path_audit.add_argument("--reasoning", default="config/reasoning.yaml", help="reasoning policy YAML")
+    path_audit.add_argument("--export", help="write path audit to a file")
+    path_audit.add_argument("--format", choices=["text", "markdown", "json"], default="text", help="output/export format")
+    path_audit.set_defaults(func=cmd_path_audit)
 
     audit = sub.add_parser("audit-properties", help="compare schema-declared edge properties with observed MORK annotations")
     audit.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8037")

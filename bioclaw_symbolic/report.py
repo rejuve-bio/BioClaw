@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import io
 from dataclasses import dataclass
 from typing import Any
 
@@ -117,6 +119,177 @@ def report_dict(
         "source_counts": neighborhood.source_counts(),
         "ranked_edges": [item.to_dict() for item in ranked],
     }
+
+
+def evidence_cards_dict(
+    neighborhood: NeighborhoodPacket,
+    raw_neighborhood: NeighborhoodPacket,
+    policy: dict[str, Any],
+    top: int = 20,
+) -> dict[str, Any]:
+    ranked = ranked_packets(neighborhood, policy, top)
+    cards: list[dict[str, Any]] = []
+    for item in ranked:
+        packet = item.packet.to_dict()
+        stv = item.assessment.get("stv", {})
+        source_entity = _entity_label(packet["source"])
+        target_entity = _entity_label(packet["target"])
+        labels = item.assessment.get("labels", [])
+        cards.append(
+            {
+                "rank": item.rank,
+                "claim": {
+                    "text": f"{source_entity} -[{item.packet.edge_type}]-> {target_entity}",
+                    "edge": item.packet.edge_atom,
+                    "edge_type": item.packet.edge_type,
+                    "source": packet["source"],
+                    "target": packet["target"],
+                },
+                "support": {
+                    "sources": _limited(item.packet.values_by_role("source"), 12),
+                    "scores": _limited(item.packet.values_by_role("score", "confidence"), 12),
+                    "evidence": _limited(item.packet.values_by_role("evidence"), 12),
+                    "references": _limited(item.packet.values_by_role("reference"), 12),
+                    "context": _limited(item.packet.values_by_role("context"), 12),
+                },
+                "symbolic_state": {
+                    "labels": labels,
+                    "stv": stv,
+                    "assessment": item.assessment.get("explanation", ""),
+                },
+                "caveat": _card_caveat(labels),
+            }
+        )
+    return {
+        "focus": {"label": neighborhood.focus.label, "id": neighborhood.focus.identifier},
+        "edge_type": neighborhood.edge_type,
+        "retrieval": {
+            "candidate_edges": len(raw_neighborhood.packets),
+            "reported_edges": len(neighborhood.packets),
+            "card_count": len(cards),
+            "limit": raw_neighborhood.limit,
+            "truncated": raw_neighborhood.truncated,
+        },
+        "source_counts": neighborhood.source_counts(),
+        "cards": cards,
+    }
+
+
+def _card_caveat(labels: list[str]) -> str:
+    if "missing_edge" in labels:
+        return "This claim was not found in the bounded MORK BioAtomspace retrieval."
+    if "multi_source" in labels:
+        return "This is bounded KG support from multiple source annotations, not independent causal proof."
+    if "single_source" in labels:
+        return "Single-source KG support; no cross-source support strengthened this claim."
+    if "source_missing" in labels:
+        return "The edge exists in the retrieved packet, but source provenance was not attached."
+    return "This is a bounded KG evidence card, not a global biological assertion."
+
+
+def render_evidence_cards(
+    neighborhood: NeighborhoodPacket,
+    raw_neighborhood: NeighborhoodPacket,
+    policy: dict[str, Any],
+    top: int = 20,
+    output_format: str = "text",
+) -> str:
+    data = evidence_cards_dict(neighborhood, raw_neighborhood, policy, top)
+    if output_format == "csv":
+        return _render_cards_csv(data)
+
+    focus = data["focus"]
+    header = f"BioClaw evidence cards for {focus['label']}:{focus['id']} via {data['edge_type']}"
+    lines: list[str] = []
+    if output_format == "markdown":
+        lines.append(f"## {header}")
+    else:
+        lines.append(header)
+        lines.append("=" * len(header))
+    lines.append(
+        f"Retrieved {data['retrieval']['candidate_edges']} candidate edge(s); "
+        f"built {data['retrieval']['card_count']} evidence card(s)."
+    )
+    if data["retrieval"]["truncated"]:
+        lines.append("Result is partial because retrieval hit the configured limit.")
+    if data["source_counts"]:
+        sources = ", ".join(f"{source}={count}" for source, count in data["source_counts"].items())
+        lines.append(f"Neighborhood source counts: {sources}.")
+    if not data["cards"]:
+        lines.append("No evidence cards matched the filters.")
+        return "\n".join(lines) + "\n"
+
+    for card in data["cards"]:
+        prefix = "###" if output_format == "markdown" else ""
+        title = f"{prefix} Card {card['rank']}: {card['claim']['text']}".strip()
+        lines.extend(["", title])
+        support = card["support"]
+        state = card["symbolic_state"]
+        if support["sources"]:
+            lines.append(f"Support sources: {', '.join(support['sources'])}")
+        if support["scores"]:
+            lines.append(f"Scores/confidence: {', '.join(support['scores'])}")
+        if support["evidence"]:
+            lines.append(f"Evidence annotations: {', '.join(support['evidence'])}")
+        if support["references"]:
+            lines.append(f"References: {', '.join(support['references'])}")
+        if support["context"]:
+            lines.append(f"Context: {', '.join(support['context'])}")
+        stv = state["stv"]
+        lines.append(
+            f"Symbolic state: {', '.join(state['labels'])} "
+            f"(strength {stv.get('strength', 0):.3f}, confidence {stv.get('confidence', 0):.3f})"
+        )
+        lines.append(f"Caveat: {card['caveat']}")
+    return "\n".join(lines) + "\n"
+
+
+def _render_cards_csv(data: dict[str, Any]) -> str:
+    handle = io.StringIO()
+    writer = csv.DictWriter(
+        handle,
+        fieldnames=[
+            "rank",
+            "claim",
+            "edge",
+            "edge_type",
+            "source_id",
+            "target_id",
+            "sources",
+            "scores",
+            "evidence",
+            "references",
+            "context",
+            "labels",
+            "strength",
+            "confidence",
+            "caveat",
+        ],
+    )
+    writer.writeheader()
+    for card in data["cards"]:
+        support = card["support"]
+        stv = card["symbolic_state"]["stv"]
+        writer.writerow(
+            {
+                "rank": card["rank"],
+                "claim": card["claim"]["text"],
+                "edge": card["claim"]["edge"],
+                "edge_type": card["claim"]["edge_type"],
+                "source_id": card["claim"]["source"]["id"],
+                "target_id": card["claim"]["target"]["id"],
+                "sources": "|".join(support["sources"]),
+                "scores": "|".join(support["scores"]),
+                "evidence": "|".join(support["evidence"]),
+                "references": "|".join(support["references"]),
+                "context": "|".join(support["context"]),
+                "labels": "|".join(card["symbolic_state"]["labels"]),
+                "strength": stv.get("strength", ""),
+                "confidence": stv.get("confidence", ""),
+                "caveat": card["caveat"],
+            }
+        )
+    return handle.getvalue()
 
 
 def render_report(
