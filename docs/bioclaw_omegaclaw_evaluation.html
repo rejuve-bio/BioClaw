@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>bioclaw_omegaclaw_evaluation</title>
+  <style>
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+  </style>
+  <link rel="stylesheet" href="paper.css" />
+</head>
+<body>
+<h1
+id="bioclaw-evaluation-what-omegaclaw-added-what-it-did-not-and-what-would-need-to-change">BioClaw
+Evaluation: What OmegaClaw Added, What It Did Not, And What Would Need
+To Change</h1>
+<h2 id="abstract">Abstract</h2>
+<p>BioClaw was explored as an OmegaClaw-based assistant and symbolic
+evidence layer for MORK BioAtomspace-backed biological knowledge graphs.
+The goal was to determine whether OmegaClaw’s agent loop, memory model,
+PLN/NAL symbolic substrate, and skill system could add value beyond
+direct schema-aware querying of the BioAtomspace.</p>
+<p>The prototype implemented schema-driven evidence extraction,
+exact-edge provenance lookup, relation-neighborhood retrieval,
+property-role auditing, schema-path tracing, evidence packet exports,
+and OmegaClaw symbolic payload generation. The useful output was the
+grounded evidence/audit layer: it made MORK BioAtomspace contents
+inspectable and traceable. However, the experiments did not show
+meaningful added value from OmegaClaw as an assistant or from PLN/NAL as
+a symbolic reasoning substrate for the current KG evidence model.</p>
+<p>The main finding is negative but useful: with the current BioKG/MORK
+data, BioClaw is best understood as a schema-aware evidence inspection
+utility, not as an OmegaClaw-native reasoning assistant. OmegaClaw would
+become useful only if the KG exposes data-derived truth values,
+conflicting assertions, source-specific evidence packets, or chain-level
+uncertainty that symbolic reasoning can actually transform.</p>
+<h2 id="motivation">1. Motivation</h2>
+<p>The original motivation for BioClaw was to test whether OmegaClaw
+could provide a distinct layer for biological curation:</p>
+<ul>
+<li>an assistant-like interface for biocurators;</li>
+<li>grounded lookup over MORK BioAtomspace;</li>
+<li>symbolic reasoning over evidence;</li>
+<li>memory and workflow separation through multiple agents;</li>
+<li>curation support beyond simple query answering.</li>
+</ul>
+<p>The concern during development was redundancy. If BioClaw only
+answers natural language questions over the KG, then it overlaps with
+the existing AI Assistant direction. If BioClaw only extracts
+schema-aware evidence packets, then it is mostly a Python/MORK utility.
+The project is only justified as an OmegaClaw application if OmegaClaw
+adds something distinct: real symbolic reasoning, useful agent
+orchestration, or memory behavior that improves curation.</p>
+<h2 id="prototype-scope">2. Prototype Scope</h2>
+<p>The implemented prototype focused on bounded evidence extraction and
+symbolic-payload generation for MORK BioAtomspace.</p>
+<p>Implemented capabilities included:</p>
+<ul>
+<li>schema capability registry from BioCypher schema and schema-role
+policy;</li>
+<li>exact-edge evidence packet extraction from MORK;</li>
+<li>relation-neighborhood extraction around an entity;</li>
+<li>source, score, evidence code, reference, context, and node-property
+audit;</li>
+<li>schema-path discovery and path-instance tracing;</li>
+<li>evidence-card and JSON/CSV/Markdown exports;</li>
+<li>OmegaClaw <code>(metta ...)</code> payload generation for grounded
+packets;</li>
+<li>synthetic PLN probe generation for <code>Truth__Revision</code> and
+<code>|~</code>;</li>
+<li>explicit skip states when real PLN/NAL reasoning is not
+justified.</li>
+</ul>
+<p>The prototype intentionally did not reason globally over the full KG.
+All operations were bounded to a claim, neighborhood, entity, or schema
+path.</p>
+<h2 id="experiments">3. Experiments</h2>
+<h3 id="synthetic-omegaclaw-pln-probe">3.1 Synthetic OmegaClaw PLN
+Probe</h3>
+<p>The <code>omega-probe</code> command generated a synthetic OmegaClaw
+skill payload:</p>
+<pre class="text"><code>(metta &quot;(Truth__Revision (stv 0.400000 0.400000) (stv 0.800000 0.800000))&quot;)
+(metta &quot;(|~ ((Inheritance BioClawProbe Supported) (stv 0.400000 0.400000))
+          ((Inheritance BioClawProbe Supported) (stv 0.800000 0.800000)))&quot;)</code></pre>
+<p>This demonstrated that BioClaw can produce OmegaClaw-compatible
+symbolic calls. It did not demonstrate biological value, because the
+inputs were synthetic and not derived from the KG.</p>
+<h3 id="multi-source-ppi-neighborhood">3.2 Multi-Source PPI
+Neighborhood</h3>
+<p>A PPI test MORK instance was loaded with Reactome, STRING, and
+UniProt data. For <code>protein:P20645</code> with
+<code>interacts_with</code>, BioClaw retrieved a bounded
+neighborhood:</p>
+<pre class="text"><code>Retrieved 737 candidate edge(s); reporting 2 multi-source edge(s).
+Sources: Reactome=2, STRING=2.
+
+P20645 -[interacts_with]-&gt; Q15836 score 0.624
+P20645 -[interacts_with]-&gt; P51151 score 0.547</code></pre>
+<p>The useful result was that BioClaw identified source overlap and
+preserved source/reference/context atoms. However, PLN revision did not
+apply. Each edge had one confidence-bearing score, while the second
+source contributed provenance but not an independent comparable truth
+value. Therefore, a multi-source tag was useful for audit, but it was
+not enough for real PLN revision.</p>
+<h3 id="gene-to-protein-schema-path">3.3 Gene To Protein Schema
+Path</h3>
+<p>For the main BioClaw MORK instance, the path query:</p>
+<pre class="text"><code>IMPACT -&gt; transcribes_to transcript -&gt; translates_to protein</code></pre>
+<p>returned:</p>
+<pre class="text"><code>gene:ENSG00000154059 -&gt; transcript:ENST00000284202 -&gt; protein:Q9P2X3</code></pre>
+<p>This was a useful schema-path grounding result. However, the path
+edges did not expose data-derived STVs. BioClaw therefore correctly
+emitted:</p>
+<pre class="text"><code>pln_status: skipped_no_data_derived_edge_stvs</code></pre>
+<p>This is the right behavior. Emitting <code>Truth__Deduction</code>
+from topology alone would be misleading because it would turn a graph
+path into a confidence claim without evidence-derived truth values.</p>
+<h3 id="entity-audit">3.4 Entity Audit</h3>
+<p>For TP53, BioClaw could audit schema-supported and missing relation
+coverage:</p>
+<pre class="text"><code>Supported relations: 6 / 37 schema relation(s).
+Examples: enhancer associations, disease associations, GO processes,
+cellular components, Reactome pathways, transcripts.</code></pre>
+<p>This is useful for KG QA and curation planning. It shows what the
+atomspace contains, which relations are populated, where provenance
+exists, and where schema coverage is missing. But this is again
+schema-aware extraction and audit, not OmegaClaw reasoning.</p>
+<h3 id="assistant-behavior">3.5 Assistant Behavior</h3>
+<p>Natural-language interaction improved when a stronger LLM was
+integrated. The system became better at phrasing grounded KG answers,
+handling typos, and answering less mechanical questions. However, this
+improvement came from the LLM and the deterministic MORK tools, not from
+OmegaClaw’s symbolic substrate. It also risks duplicating an existing AI
+Assistant-style project.</p>
+<h2 id="results">4. Results</h2>
+<h3 id="what-worked">4.1 What Worked</h3>
+<p>The schema-aware MORK evidence layer worked and is useful.</p>
+<p>It can:</p>
+<ul>
+<li>inspect what entities and edges exist in MORK BioAtomspace;</li>
+<li>retrieve source, score, evidence, reference, and context
+annotations;</li>
+<li>distinguish supported schema paths from missing coverage;</li>
+<li>detect source overlap in neighborhoods;</li>
+<li>produce exportable evidence packets;</li>
+<li>give curators traceable grounded artifacts.</li>
+</ul>
+<p>This is valuable for KG QA, curation triage, and downstream
+analysis.</p>
+<h3 id="what-did-not-add-value">4.2 What Did Not Add Value</h3>
+<p>OmegaClaw did not add clear value as an assistant in this
+setting.</p>
+<p>The assistant behavior was mostly:</p>
+<ul>
+<li>natural-language routing;</li>
+<li>grounded MORK lookup;</li>
+<li>answer rewriting;</li>
+<li>curation phrasing.</li>
+</ul>
+<p>These are not OmegaClaw-specific capabilities. A conventional LLM
+assistant with deterministic tools can provide them.</p>
+<p>PLN/NAL did not add clear value on the current KG.</p>
+<p>The reasons were concrete:</p>
+<ul>
+<li>Many edges have provenance but not multiple comparable truth
+values.</li>
+<li>A score alone is not a full STV. It should not be reused as both
+strength and confidence.</li>
+<li>Multi-source support is often source overlap, not independent
+confidence estimates suitable for revision.</li>
+<li>Schema paths are often topology-only and do not expose edge-level
+support values.</li>
+<li>Curation labels such as <code>edge_present</code>,
+<code>multi_source</code>, or <code>actionable</code> are already
+derived by Python audit logic. Re-deriving them with a constant NAL rule
+would be circular and uninformative.</li>
+</ul>
+<h2 id="why-the-initial-symbolic-framing-failed">5. Why The Initial
+Symbolic Framing Failed</h2>
+<p>The initial symbolic framing assumed that uncertainty in biological
+data would naturally make PLN useful. The experiments showed that this
+assumption is incomplete.</p>
+<p>PLN needs structured uncertainty:</p>
+<pre class="text"><code>same claim, multiple independent truth values
+or
+chain of claims, each with data-derived support
+or
+conflicting claims with comparable evidence</code></pre>
+<p>The current BioKG/MORK representation usually provides:</p>
+<pre class="text"><code>edge exists
+source annotation exists
+sometimes score exists
+sometimes evidence/reference/context exists</code></pre>
+<p>That is enough for auditing, but not enough for meaningful PLN.
+Without source-specific assertion objects or independent truth values,
+symbolic revision either cannot run or becomes artificial.</p>
+<p>The key correction made during the prototype was to stop emitting
+symbolic operations when they did not change anything. Topology-only
+paths now produce grounding plus an explicit skip reason, not fake PLN
+deduction. Curation states are represented as audit labels, not NAL
+conclusions.</p>
+<h2 id="conclusion">6. Conclusion</h2>
+<p>For the current BioKG/MORK evidence model, BioClaw does not justify
+itself as an OmegaClaw assistant or symbolic reasoning system.</p>
+<p>The useful component is a Python-based schema-aware MORK
+evidence/audit layer. That component does not require OmegaClaw. It
+should be kept only if the team needs a standalone utility for
+inspecting MORK BioAtomspace contents, coverage, provenance, and schema
+paths.</p>
+<p>The OmegaClaw-specific BioClaw direction should not continue unless a
+future dataset or workflow supplies the missing reasoning substrate:
+explicit source-specific assertions, data-derived STVs, conflicting
+evidence, or multi-step chains with confidence-bearing edges.</p>
+<p>This is a negative result, but it is productive. It prevents the
+project from forcing symbolic reasoning where representation and audit
+are sufficient.</p>
+<h2 id="recommendations">7. Recommendations</h2>
+<h3 id="recommendation-for-bioclaw">7.1 Recommendation For BioClaw</h3>
+<p>Do not continue BioClaw as an OmegaClaw assistant in its current
+form.</p>
+<p>If useful, preserve the codebase as:</p>
+<pre class="text"><code>MORK BioAtomspace schema/evidence audit utility</code></pre>
+<p>not as:</p>
+<pre class="text"><code>OmegaClaw biological reasoning assistant</code></pre>
+<p>Recommended retained features:</p>
+<ul>
+<li>schema capability registry;</li>
+<li>exact-edge evidence packet extraction;</li>
+<li>relation-neighborhood audit;</li>
+<li>schema-path tracing;</li>
+<li>source/reference/context audit;</li>
+<li>JSON/CSV/Markdown export;</li>
+<li>explicit “reasoning not applicable” reports.</li>
+</ul>
+<p>Recommended discontinued or deferred features:</p>
+<ul>
+<li>chatbot-style BioClaw assistant;</li>
+<li>PLN/NAL claims over topology-only paths;</li>
+<li>NAL curation-state inference from Python labels;</li>
+<li>OmegaClaw orchestration unless a distinct reasoning use case
+appears.</li>
+</ul>
+<h3 id="recommendation-for-future-evaluation">7.2 Recommendation For
+Future Evaluation</h3>
+<p>Only revisit OmegaClaw symbolic reasoning if a dataset has at least
+one of:</p>
+<ul>
+<li>multiple independent truth values for the same claim;</li>
+<li>explicit source-specific assertion nodes;</li>
+<li>conflicting evidence with comparable evidence scores;</li>
+<li>multi-hop paths where each edge has support values;</li>
+<li>curation workflows where symbolic inference changes
+prioritization.</li>
+</ul>
+<p>Candidate future tests:</p>
+<ul>
+<li>cross-species orthology confidence chains;</li>
+<li>multi-paper evidence with agreement and disagreement;</li>
+<li>claims with explicit opposing relations;</li>
+<li>KG quality rules that detect inconsistency from independently
+asserted facts;</li>
+<li>source-specific assertion reification where the same edge can carry
+different source-local scores.</li>
+</ul>
+<h2 id="feature-requests-for-the-omegaclaw-team">8. Feature Requests For
+The OmegaClaw Team</h2>
+<p>The BioClaw experiments exposed several gaps that would make
+OmegaClaw more useful for grounded KG curation.</p>
+<h3 id="structured-skill-results">8.1 Structured Skill Results</h3>
+<p>OmegaClaw’s <code>(metta ...)</code> skill should return structured
+machine-readable results, not only textual/log output.</p>
+<p>Feature request:</p>
+<pre class="text"><code>metta-json expression -&gt; JSON result containing term, stv, rule, premises</code></pre>
+<p>Why it matters: BioClaw needs to parse returned STVs and attach them
+to evidence reports. Without structured outputs, symbolic execution is
+hard to integrate safely.</p>
+<h3 id="first-class-evidence-assertion-objects">8.2 First-Class Evidence
+Assertion Objects</h3>
+<p>OmegaClaw should support a pattern for reified evidence
+assertions:</p>
+<pre class="text"><code>assertion_1 asserts (A -[edge]-&gt; B)
+assertion_1 source Reactome
+assertion_1 strength x
+assertion_1 confidence c
+assertion_1 reference PMID</code></pre>
+<p>Why it matters: MORK deduplicates edge atoms. If multiple sources
+annotate the same edge atom, BioClaw needs a standard way to preserve
+source-specific truth values before revision.</p>
+<h3 id="guardrails-against-fake-reasoning">8.3 Guardrails Against Fake
+Reasoning</h3>
+<p>OmegaClaw should make it easier to distinguish:</p>
+<pre class="text"><code>grounding / representation</code></pre>
+<p>from:</p>
+<pre class="text"><code>symbolic inference that changes or derives a result</code></pre>
+<p>Feature request:</p>
+<ul>
+<li>require each inferred conclusion to include premises, rule, and
+whether the conclusion differs from an asserted input;</li>
+<li>warn when a rule only re-derives a label already provided as
+input;</li>
+<li>warn when rule truth values are constants rather than
+data-derived.</li>
+</ul>
+<h3 id="stv-construction-guidance">8.4 STV Construction Guidance</h3>
+<p>OmegaClaw should provide guidance or helper functions for
+constructing STVs from real data.</p>
+<p>Feature request:</p>
+<ul>
+<li>separate strength from confidence explicitly;</li>
+<li>support confidence from evidence count, source independence, and
+evidence type;</li>
+<li>avoid treating one scalar score as both strength and
+confidence.</li>
+</ul>
+<p>Why it matters: Many biological KGs expose scores, p-values, or
+evidence codes, but these are not automatically PLN STVs.</p>
+<h3 id="bounded-kg-reasoning-api">8.5 Bounded KG Reasoning API</h3>
+<p>OmegaClaw should support a standard “bounded evidence packet”
+reasoning API.</p>
+<p>Feature request:</p>
+<pre class="text"><code>reason-over-packet packet_id mode</code></pre>
+<p>where <code>mode</code> can be:</p>
+<ul>
+<li>revision;</li>
+<li>deduction;</li>
+<li>abduction;</li>
+<li>consistency check;</li>
+<li>contradiction check;</li>
+<li>curation-state classification.</li>
+</ul>
+<p>The API should reject unsupported modes when required evidence is
+missing.</p>
+<h3 id="integration-with-mork-query-results">8.6 Integration With MORK
+Query Results</h3>
+<p>OmegaClaw should provide a clean bridge from MORK query output to
+symbolic terms.</p>
+<p>Feature request:</p>
+<ul>
+<li>canonical conversion from MORK atoms to OmegaClaw reasoning
+terms;</li>
+<li>preservation of source, score, evidence, and reference
+metadata;</li>
+<li>support for source-specific edge assertions;</li>
+<li>bounded result pagination and export.</li>
+</ul>
+<h3 id="evaluation-harness-for-real-reasoning">8.7 Evaluation Harness
+For Real Reasoning</h3>
+<p>OmegaClaw should include tests that prove reasoning added value.</p>
+<p>Each test should answer:</p>
+<pre class="text"><code>What did the symbolic layer produce that extraction alone did not?</code></pre>
+<p>Recommended fixtures:</p>
+<ul>
+<li>two sources with different truth values for one claim;</li>
+<li>a path with edge-level truth values;</li>
+<li>a conflicting evidence case;</li>
+<li>an abduction case where a downstream observation suggests an
+upstream hypothesis;</li>
+<li>a negative-control case where reasoning should be skipped.</li>
+</ul>
+<h2 id="final-position">9. Final Position</h2>
+<p>The BioClaw experiment should be reported as an evaluation, not a
+failed implementation.</p>
+<p>It showed:</p>
+<ul>
+<li>MORK BioAtomspace can be inspected effectively through schema-aware
+Python tooling;</li>
+<li>OmegaClaw symbolic calls can be generated and dispatched;</li>
+<li>the current BioKG data does not justify PLN/NAL as a core reasoning
+layer;</li>
+<li>assistant behavior would be redundant with existing assistant
+work;</li>
+<li>future OmegaClaw value depends on better evidence assertion modeling
+and structured symbolic outputs.</li>
+</ul>
+<p>Therefore, the recommended decision is to stop BioClaw as an
+OmegaClaw-based assistant/symbolic substrate for the current KG,
+preserve useful extraction utilities if needed, and provide the
+OmegaClaw team with the feature requests above.</p>
+</body>
+</html>
