@@ -13,9 +13,8 @@ tracing paths, exporting results, and generating OmegaClaw experiment payloads.
 | [symbolic](https://github.com/rejuve-bio/BioClaw/tree/symbolic) | Schema registry, MORK client, evidence/audit CLI, exports, and OmegaClaw experiments | Evidence representation, retrieval correctness, and limits of symbolic inference |
 
 Read the [evaluator guide](docs/evaluation.md) for a short code walkthrough,
-the [command guide](docs/commands.md) for reproducible CLI examples, and the
-[IRC gallery](docs/irc-demo.md) for the earlier conversational prototype.
-IRC screenshots document `main`; this branch does not start chat agents.
+and the [command guide](docs/commands.md) for reproducible CLI examples.
+This branch is evaluated through the CLI and local regression tests.
 
 The work moved from the conversational prototype to symbolic experiments
 because the assistant behavior overlapped with existing assistant work.
@@ -110,15 +109,6 @@ See the [command guide](docs/commands.md) for path tracing, evidence exports,
 property audits, and OmegaClaw payload generation. The `.env.example` is a
 reference template; this CLI does not automatically load `.env`.
 
-## IRC Evidence From The Earlier Prototype
-
-![Earlier IRC prototype retrieving IMPACT annotations through AssistantOC](docs/images/irc-assistant-lookup.jpg)
-
-The earlier prototype demonstrated visible specialist routing and grounded
-annotation lookup. The [full gallery](docs/irc-demo.md) also shows source
-aggregation and provenance. The captures predate later scoring changes and
-should be read as historical workflow evidence.
-
 ## How To Interpret Results
 
 | Output | Meaning | Limit |
@@ -158,8 +148,6 @@ examples/          Small schema and request examples
 tests/             Offline regression tests
 docs/commands.md   CLI walkthrough and troubleshooting
 docs/evaluation.md Evaluator reading order and acceptance checks
-docs/irc-demo.md   Historical IRC evidence from main
-docs/images/       Original demo screenshots
 ```
 
 The earlier [evaluation write-up](docs/bioclaw_omegaclaw_evaluation.md) is kept
