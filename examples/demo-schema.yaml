@@ -1,0 +1,82 @@
+# Small offline schema example. This file contains contracts, not KG data.
+gene:
+  represented_as: node
+  input_label: gene
+  properties:
+    gene_name:
+      type: str
+      biolink: name
+
+transcript:
+  represented_as: node
+  input_label: transcript
+  properties:
+    transcript_name:
+      type: str
+      biolink: name
+
+protein:
+  represented_as: node
+  input_label: protein
+  properties:
+    protein_name:
+      type: str
+      biolink: name
+
+pathway:
+  represented_as: node
+  input_label: pathway
+  properties:
+    pathway_name:
+      type: str
+      biolink: name
+
+gene transcript relation:
+  represented_as: edge
+  input_label: transcribes_to
+  source: gene
+  target: transcript
+  properties:
+    source:
+      type: str
+      biolink: knowledge_source
+    reference:
+      type: str
+
+transcript protein relation:
+  represented_as: edge
+  input_label: translates_to
+  source: transcript
+  target: protein
+  properties:
+    source:
+      type: str
+      biolink: knowledge_source
+    reference:
+      type: str
+
+protein pathway relation:
+  represented_as: edge
+  input_label: participates_in
+  source: protein
+  target: pathway
+  properties:
+    source:
+      type: str
+      biolink: knowledge_source
+    evidence_code:
+      type: str
+    reference:
+      type: str
+
+gene pathway relation:
+  represented_as: edge
+  input_label: participates_in
+  source: gene
+  target: pathway
+  properties:
+    source:
+      type: str
+      biolink: knowledge_source
+    reference:
+      type: str
