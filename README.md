@@ -1,458 +1,167 @@
 # BioClaw Symbolic
 
-BioClaw Symbolic is a focused evidence and audit layer for a MORK
-BioAtomspace, with experimental OmegaClaw payload generation for bounded
-evidence packets.
+This branch contains BioClaw's experiments in schema-guided evidence extraction
+and bounded symbolic reasoning over a MORK BioAtomspace. It provides a Python
+library and CLI for retrieving evidence packets, inspecting relation coverage,
+tracing paths, exporting results, and generating OmegaClaw experiment payloads.
 
-This branch is intentionally different from the earlier IRC multi-agent demo.
-It removes the conductor/assistant/reasoner overlay and keeps the work centered
-on the part that is not already solved by ordinary assistant systems:
+## Start Here
 
-- inspect the loaded BioCypher schema and adapter-derived edge capabilities;
-- extract bounded evidence packets from MORK BioAtomspace;
-- preserve atom-level provenance, score, evidence, context, and references;
-- classify retrieved annotations through schema roles before reasoning;
-- run focused packet-local evidence assessment over the retrieved packet roles;
-- produce auditable evidence objects for curators and downstream pipelines.
+| Branch | Implementation | Evaluation focus |
+| --- | --- | --- |
+| [main](https://github.com/rejuve-bio/BioClaw/tree/main) | Conversational prototype with Conductor, AssistantOC, and ReasonerOC | Grounded IRC interaction, delegation, provenance, and approval workflow |
+| [symbolic](https://github.com/rejuve-bio/BioClaw/tree/symbolic) | Schema registry, MORK client, evidence/audit CLI, exports, and OmegaClaw experiments | Evidence representation, retrieval correctness, and limits of symbolic inference |
 
-BioClaw does not treat LLM text or workflow memory as biological truth. The
-source of biological evidence is the MORK BioAtomspace.
+Read the [evaluator guide](docs/evaluation.md) for a short code walkthrough,
+the [command guide](docs/commands.md) for reproducible CLI examples, and the
+[IRC gallery](docs/irc-demo.md) for the earlier conversational prototype.
+IRC screenshots document `main`; this branch does not start chat agents.
 
-## Architecture
+The work moved from the conversational prototype to symbolic experiments
+because the assistant behavior overlapped with existing assistant work.
+The experiments produced working retrieval and audit utilities. They did not
+establish additional biological insight from PLN/NAL on the tested packets.
+The [experiment report](docs/bioclaw_omegaclaw_evaluation.md) records the scope
+and findings.
 
-```text
-User / API request
-    |
-    v
-Planner / CLI / future skill
-    |
-    +--> Schema capability registry
-    |       Reads BioCypher schema and exposes relation classes, source/target
-    |       types, evidence-bearing properties, scores, references, and context.
-    |
-    +--> MORK evidence extractor
-    |       Retrieves a bounded packet: edge atom + attached source, score,
-    |       evidence, reference, and context atoms.
-    |
-    +--> Evidence assessment / OmegaClaw payloads
-    |       Applies packet-local, schema-role-aware assessment and emits
-    |       OmegaClaw-compatible payloads only when the packet carries enough
-    |       data-derived support for a symbolic operation.
-    |
-    +--> Report / export
-            Emits JSON evidence objects and concise curator-facing summaries.
-```
+## What Was Implemented
 
-The important constraint is scale: BioClaw does not try to load the full
-BioAtomspace into a reasoner. It retrieves a small, schema-valid evidence packet
-and assesses that bounded packet. The current evaluation found that, for the
-tested MORK packets, the useful layer is schema-aware evidence extraction and
-audit. OmegaClaw PLN/NAL payloads are generated conservatively and are skipped
-when the packet has no data-derived STVs or comparable source-local truth
-values.
-
-## Repository Layout
+| Capability | Inspect |
+| --- | --- |
+| Read node/edge contracts, inherited properties, and annotation roles | [schema.py](bioclaw_symbolic/schema.py), [schema_policy.py](bioclaw_symbolic/schema_policy.py) |
+| Resolve entities and retrieve edge, neighborhood, and path evidence | [mork.py](bioclaw_symbolic/mork.py) |
+| Preserve edge atoms, annotations, roles, and node details | [evidence.py](bioclaw_symbolic/evidence.py) |
+| Audit observed properties, entity relations, and path coverage | [audit.py](bioclaw_symbolic/audit.py), [entity_audit.py](bioclaw_symbolic/entity_audit.py), [path_audit.py](bioclaw_symbolic/path_audit.py) |
+| Produce reports, evidence cards, and JSON/JSONL/CSV exports | [report.py](bioclaw_symbolic/report.py), [cli.py](bioclaw_symbolic/cli.py) |
+| Generate MeTTa, OmegaClaw skill, and mock-test payloads | [omegaclaw.py](bioclaw_symbolic/omegaclaw.py) |
+| Check packet handling and schema traversal without a live service | [tests/test_symbolic_core.py](tests/test_symbolic_core.py) |
 
 ```text
-bioclaw/
-├── bioclaw_symbolic/
-│   ├── cli.py          # command-line entrypoint
-│   ├── entity_audit.py # entity-level schema coverage audit
-│   ├── evidence.py     # evidence packet data model and summaries
-│   ├── hypothesis.py   # traceable path/neighborhood hypothesis summaries
-│   ├── mork.py         # MORK export client and packet extraction
-│   ├── omegaclaw.py    # OmegaClaw-compatible payload generation
-│   ├── path_audit.py   # schema-wide path audit helpers
-│   ├── reasoning.py    # packet-local assessment and interim confidence heuristic
-│   ├── schema.py       # BioCypher schema capability registry
-│   └── schema_policy.py # configurable property-role policy
-├── config/
-│   ├── reasoning.yaml  # neutral default reasoning policy
-│   └── schema_roles.yaml # schema property-role mapping
-├── examples/
-│   └── ppi-edge.json   # example exact-edge request
-├── docs/
-│   └── bioclaw_omegaclaw_evaluation.md
-├── pyproject.toml
-└── README.md
+CLI request + BioCypher schema + property-role policy
+                         |
+                  Schema registry
+                         |
+                  MORK retrieval
+                         |
+                  Evidence packets
+                    /          \
+            Audits / exports   Experimental OmegaClaw payloads
 ```
 
-## Setup
+The schema supplies relation and property contracts. It does not prove that
+the loaded Atomspace contains every declared relation.
 
-Install in editable mode from this directory:
+## Quick Start Without A Server
+
+Use Python 3.10 or newer. Run these commands from the repository root:
 
 ```bash
-python3 -m pip install -e .
+git clone --branch symbolic https://github.com/rejuve-bio/BioClaw.git
+cd BioClaw
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
+
+python -m bioclaw_symbolic.cli --help
+python -m bioclaw_symbolic.cli schema \
+  --schema examples/demo-schema.yaml --summary
+python -m unittest discover -s tests -v
+python -m bioclaw_symbolic.cli omega-probe --format skill
 ```
 
-If dependencies are already available and you do not want to install the
-package, run commands with:
+The example schema is a small contract for inspecting the CLI; it contains no
+biological observations. The probe generates synthetic revision inputs.
+Neither command requires a MORK server, an API key, or an LLM, and generating
+a probe does not run OmegaClaw.
+
+The CLI also installs as `bioclaw-symbolic`. Its default policy paths are
+relative to the working directory, so use the repository root or pass explicit
+`--schema-policy` and `--reasoning` paths.
+
+## Evaluate Against MORK
+
+You need a loaded MORK service and its matching BioCypher schema. The data
+and MORK service are external to this repository.
 
 ```bash
-PYTHONPATH=. python3 -m bioclaw_symbolic.cli --help
-```
+export BIOCLAW_MORK_URL=http://localhost:8027
+export BIOCLAW_SCHEMA=/absolute/path/to/hsa_schema_config.yaml
 
-Run the local unit tests with:
-
-```bash
-PYTHONPATH=. python3 -m unittest discover -s tests -v
-```
-
-## Inputs
-
-BioClaw expects:
-
-- a reachable MORK service;
-- a BioCypher schema YAML matching the loaded data;
-- a schema role policy YAML that maps schema properties to roles such as
-  source, score, evidence, reference, context, name, xref, and description;
-- optional reasoning policy YAML for thresholds and no-schema fallback names.
-
-For the PPI experiment, the MORK service was loaded separately on port `8037`
-with STRING, Reactome, and UniProt MeTTa files. The MORK namespace used by the
-BioCypher loader is often `annotation`. Older BioClaw/MORK loads may use the
-`default` namespace. BioClaw Symbolic now defaults to `--namespace auto`, which
-tries `annotation`, `default`, and raw atoms in that order. Pass an explicit
-namespace only when you want to force one wrapper.
-
-## Inspect Schema Capabilities
-
-```bash
-PYTHONPATH=. python3 -m bioclaw_symbolic.cli schema \
-  --schema /path/to/biocypher-kg/config/hsa/hsa_schema_config.yaml \
-  --schema-policy config/schema_roles.yaml
-```
-
-This prints relation classes and whether schema properties map to useful
-evidence roles such as source, score, evidence code, references, or context.
-The mapping is not embedded in Python; it comes from `config/schema_roles.yaml`
-and can be replaced for a different MORK BioAtomspace.
-
-When a command receives `--schema`, BioClaw queries edge annotations from the
-properties declared for that edge class in the schema and attaches each
-annotation's role to the evidence packet. Summaries, multi-source filtering,
-symbolic assessment, and CSV exports then use roles such as `source`, `score`,
-`reference`, and `context` instead of fixed annotation names.
-
-If a MORK atom has an extra annotation that is not declared by the active
-schema, BioClaw treats that as a schema/adapter alignment issue rather than
-silently relying on a Python hardcoded property list.
-
-## Extract An Exact Edge Evidence Packet
-
-```bash
-PYTHONPATH=. python3 -m bioclaw_symbolic.cli edge \
-  --mork http://localhost:8037 \
-  --source protein:P20645 \
-  --edge interacts_with \
-  --target protein:P51151 \
-  --schema /path/to/biocypher-kg/config/hsa/hsa_schema_config.yaml \
-  --include-node-details
-```
-
-Expected shape for the current PPI test atomspace depends on the active schema.
-For `interacts_with`, the schema-driven output includes declared edge
-properties such as:
-
-```json
-{
-  "edge": "(interacts_with (protein P20645) (protein P51151))",
-  "exists": true,
-  "annotations": {
-    "source": ["STRING", "Reactome"],
-    "score": ["0.547"],
-    "source_url": ["https://reactome.org/", "https://string-db.org/"],
-    "interaction_type": ["physical_association"]
-  }
-}
-```
-
-## Run Bounded Packet Assessment
-
-Add `--reason` to compute a small evidence assessment over the packet:
-
-```bash
-PYTHONPATH=. python3 -m bioclaw_symbolic.cli edge \
-  --mork http://localhost:8037 \
-  --source protein:P20645 \
-  --edge interacts_with \
-  --target protein:P51151 \
-  --schema /path/to/biocypher-kg/config/hsa/hsa_schema_config.yaml \
-  --include-node-details \
-  --reason
-```
-
-The first target is exact-edge evidence audit. With `--schema`, this audit is
-role-based:
-
-- does the edge exist?
-- which annotations have the `source` role and what sources support it?
-- which annotations have `score` or `confidence` roles?
-- which annotations have `reference`, `context`, or `evidence` roles?
-- is it single-source, multi-source, scored, referenced, or missing support?
-
-## Extract A Neighborhood
-
-Exact-edge lookup is useful for debugging, but BioClaw becomes more valuable
-when it extracts a bounded neighborhood and identifies source support across
-many related edges.
-
-For example, inspect all `interacts_with` edges around one protein:
-
-```bash
-PYTHONPATH=. python3 -m bioclaw_symbolic.cli neighborhood \
-  --mork http://localhost:8037 \
-  --entity protein:P20645 \
-  --edge interacts_with \
-  --direction both \
-  --max-total 100 \
-  --schema /path/to/biocypher-kg/config/hsa/hsa_schema_config.yaml \
-  --include-node-details \
-  --reason
-```
-
-The output summarizes:
-
-- total incident edges found;
-- source counts across the neighborhood;
-- how many edges have multi-source support;
-- which edges are actionable under the configured reasoning policy;
-- whether results were truncated by the safety cap.
-
-Use `--only-multisource` to return only edges that have more than one source
-annotation within the bounded retrieval result:
-
-```bash
-PYTHONPATH=. python3 -m bioclaw_symbolic.cli neighborhood \
-  --mork http://localhost:8037 \
-  --entity protein:P20645 \
-  --edge interacts_with \
-  --direction both \
-  --max-total 1000 \
-  --only-multisource \
-  --schema /path/to/biocypher-kg/config/hsa/hsa_schema_config.yaml \
-  --include-node-details \
-  --reason
-```
-
-Use `--include-packets` when you want every edge packet in the JSON output:
-
-```bash
-PYTHONPATH=. python3 -m bioclaw_symbolic.cli neighborhood \
-  --mork http://localhost:8037 \
-  --entity protein:P20645 \
-  --edge interacts_with \
-  --schema /path/to/biocypher-kg/config/hsa/hsa_schema_config.yaml \
-  --include-node-details \
-  --include-packets \
-  --reason
-```
-
-Use `--export` to write the returned packet set to a file:
-
-```bash
-PYTHONPATH=. python3 -m bioclaw_symbolic.cli neighborhood \
-  --mork http://localhost:8037 \
-  --entity protein:P20645 \
-  --edge interacts_with \
-  --direction both \
-  --max-total 1000 \
-  --only-multisource \
-  --schema /path/to/biocypher-kg/config/hsa/hsa_schema_config.yaml \
-  --include-node-details \
-  --reason \
-  --export p20645_multisource_interactions.json \
-  --format json
-```
-
-Supported export formats are `json`, `jsonl`, and `csv`. JSON/JSONL retain raw
-annotation names plus their schema-derived roles. CSV keeps stable role-based
-columns (`sources`, `scores`, `evidence`, `references`, `context`) so downstream
-pipelines do not need to know every source-specific annotation name.
-
-## Render A Ranked Curator Report
-
-Use `report` when you want a human-readable ranked view over the same
-schema-driven neighborhood packets:
-
-```bash
-PYTHONPATH=. python3 -m bioclaw_symbolic.cli report \
-  --mork http://localhost:8037 \
-  --schema /path/to/biocypher-kg/config/hsa/hsa_schema_config.yaml \
+python -m bioclaw_symbolic.cli entity-audit \
+  --mork "$BIOCLAW_MORK_URL" \
+  --schema "$BIOCLAW_SCHEMA" \
   --schema-policy config/schema_roles.yaml \
-  --entity protein:P20645 \
-  --edge interacts_with \
-  --direction both \
-  --max-total 1000 \
-  --only-multisource \
-  --include-node-details \
-  --top 10
-```
-
-The report ranks returned edges by packet confidence, then source support,
-reference support, and context support. It renders role-based evidence fields:
-sources, score/confidence values, evidence annotations, references, context,
-and labels. The same command supports `--format markdown` for notes and
-`--format json` for downstream analysis.
-
-## Trace Schema Paths
-
-Use `schema-path` when the question is not a single edge but a schema-valid
-traversal, such as gene to protein through transcript:
-
-```bash
-PYTHONPATH=. python3 -m bioclaw_symbolic.cli schema-path \
-  --schema /path/to/biocypher-kg/config/hsa/hsa_schema_config.yaml \
-  --schema-policy config/schema_roles.yaml \
-  --entity gene:ENSG00000154059 \
-  --target-type protein \
-  --max-depth 3
-```
-
-This first reports schema-valid paths, for example:
-
-```text
-gene -[transcribes_to]-> transcript -[translates_to]-> protein
-```
-
-Add `--mork` to retrieve concrete MORK path instances for the start entity:
-
-```bash
-PYTHONPATH=. python3 -m bioclaw_symbolic.cli schema-path \
-  --mork http://localhost:8037 \
-  --schema /path/to/biocypher-kg/config/hsa/hsa_schema_config.yaml \
-  --schema-policy config/schema_roles.yaml \
-  --entity IMPACT \
-  --start-type gene \
-  --target-type protein \
-  --max-depth 3 \
-  --instances-per-path 20 \
-  --diagnose
-```
-
-This command is schema-driven: it discovers possible edge chains from the
-schema's source and target node types, resolves display names through
-schema-declared node name properties, and retrieves matching MORK atoms with the
-same joined `/transform` style used by the older BioClaw backend. A schema path
-with no returned MORK instances means the schema can represent that traversal,
-but this Atomspace snapshot did not return matching data for the chosen start
-entity within the requested limits. `--diagnose` prints the start atom
-existence check and per-step traversal counts, which helps distinguish a
-missing start atom from a missing intermediate edge.
-
-Current pagination status: this is bounded retrieval plus export. Native MORK
-cursor pagination is not used yet, so `--max-total` is still a safety cap and
-`truncated=true` means the result is partial. For full-scale analysis, increase
-`--max-total` deliberately and export to JSONL or CSV.
-
-`--include-node-details` is schema-aware. BioClaw reads node properties from the
-loaded BioCypher schema, classifies their roles through `config/schema_roles.yaml`,
-then queries those properties from MORK. This keeps node enrichment data-driven
-instead of hardcoding protein/gene/pathway property names in the code. Use
-`--schema-policy /path/to/schema_roles.yaml` to swap the policy for another
-atomspace.
-
-For display-name resolution, commands that take a focus entity also accept
-`--entity-type`; exact-edge extraction accepts `--source-type` and
-`--target-type`. Use these when a name could appear under multiple node classes,
-for example `--entity IMPACT --entity-type gene`.
-
-## Audit Schema / Atomspace Alignment
-
-Because BioClaw is schema-driven, it can also find mismatches between what the
-schema declares and what MORK actually contains. This is useful for large KG
-quality control.
-
-```bash
-PYTHONPATH=. python3 -m bioclaw_symbolic.cli audit-properties \
-  --mork http://localhost:8037 \
-  --schema /path/to/biocypher-kg/config/hsa/hsa_schema_config.yaml \
-  --schema-policy config/schema_roles.yaml \
-  --entity protein:P20645 \
-  --edge interacts_with \
-  --direction both \
-  --max-total 1000
-```
-
-The report compares:
-
-- schema-declared edge properties;
-- observed MORK annotation predicates on sampled edge atoms;
-- observed properties missing from the schema;
-- schema-declared properties not observed in the sampled atomspace.
-
-If MORK contains an annotation such as `pubmed_references` but the active schema
-does not declare it for the edge type, this command should report it as
-`missing_from_schema`. That should be fixed in the schema/adapter layer rather
-than patched into BioClaw Python code.
-
-When multiple schema edge definitions share the same MORK edge label, BioClaw
-filters schema properties by the observed source/target node labels in the
-retrieved packets. This avoids mixing unrelated properties from another schema
-contract that happens to use the same edge predicate.
-
-## Entity And Path Audits
-
-Use `entity-audit` to inspect which schema relations are actually populated for
-one entity in the loaded MORK BioAtomspace:
-
-```bash
-PYTHONPATH=. python3 -m bioclaw_symbolic.cli entity-audit \
-  --mork http://localhost:8027 \
-  --schema /path/to/biocypher-kg/config/hsa/hsa_schema_config.yaml \
-  --schema-policy config/schema_roles.yaml \
-  --entity TP53 \
-  --entity-type gene \
+  --entity TP53 --entity-type gene \
   --max-edges-per-relation 50 \
-  --only-supported \
-  --show-missing-summary \
-  --format markdown
+  --only-supported --show-missing-summary --format markdown
 ```
 
-Use `path-audit` when you want schema-wide path candidates and coverage checks
-instead of a single entity path.
+This example requires the human development dataset. Historical experiments
+used port `8027` for that dataset and `8037` for a separate PPI-only instance.
+Ports are deployment choices, not dataset discovery. Use an endpoint that
+actually contains the entities in your query.
 
-## OmegaClaw Payload Experiments
+Namespace defaults to `auto`: each query tries `annotation`, then `default`,
+then raw atoms until it finds results. This is fallback, not a union across
+namespaces. An explicit `--namespace annotation`, `--namespace default`, or
+`--namespace -` selects one representation.
 
-The `omega-spike`, `omega-neighborhood`, and `omega-path` commands generate
-OmegaClaw-compatible payloads from bounded MORK packets. These commands are
-deliberately conservative: they represent grounded evidence atoms and only add
-PLN revision candidates when the packet contains multiple comparable
-data-derived truth values. Topology-only paths produce explicit skip states
-instead of artificial confidence claims.
+See the [command guide](docs/commands.md) for path tracing, evidence exports,
+property audits, and OmegaClaw payload generation. The `.env.example` is a
+reference template; this CLI does not automatically load `.env`.
 
-The evaluation paper in
-[`docs/bioclaw_omegaclaw_evaluation.md`](docs/bioclaw_omegaclaw_evaluation.md)
-summarizes the experiments and the current conclusion: BioClaw is useful as a
-schema-aware MORK evidence/audit utility, while OmegaClaw symbolic reasoning did
-not yet add demonstrated value on the tested packets.
+## IRC Evidence From The Earlier Prototype
 
-## What Was Removed From The Old System
+![Earlier IRC prototype retrieving IMPACT annotations through AssistantOC](docs/images/irc-assistant-lookup.jpg)
 
-This branch deliberately removes:
+The earlier prototype demonstrated visible specialist routing and grounded
+annotation lookup. The [full gallery](docs/irc-demo.md) also shows source
+aggregation and provenance. The captures predate later scoring changes and
+should be read as historical workflow evidence.
 
-- IRC/Telegram channel adapters;
-- conductor, AssistantOC, and ReasonerOC prompt files;
-- internal RPC routing;
-- the old monolithic `biokg.py` tool layer;
-- Docker image overlays for OmegaClaw demo agents;
-- staging/proposal demo commands.
+## How To Interpret Results
 
-Those pieces were useful for the earlier demo, but they are not the core of the
-symbolic BioClaw plan. They can be reintroduced later as wrappers around this
-library if needed.
+| Output | Meaning | Limit |
+| --- | --- | --- |
+| Edge packet | Retrieved edge atom and schema-selected annotations | Source names and scores may be attached to the merged edge without a source-to-score pairing |
+| Neighborhood | Bounded set of incident edges and source counts | `--only-multisource` filters that retrieved set |
+| Schema path | A chain permitted by the schema, optionally populated by KG atoms | A valid path is not a causal conclusion or a new biological assertion |
+| Entity/path audit | Which requested relations/paths returned data within the bounds | Unobserved coverage does not prove a biological absence or a broken KG |
+| Packet assessment | Python policy labels and interim scoring heuristics | `actionable` and STV fields are not validated biological confidence |
+| OmegaClaw payload | Serialized atoms and candidate symbolic calls | Generated payloads and mock tests alone do not establish successful inference or scientific value |
 
-## Current Scope
+`--reason` uses the Python assessment in
+[reasoning.py](bioclaw_symbolic/reasoning.py); it does not invoke OmegaClaw.
+That assessment can clamp score values, combine them heuristically, and
+fall back to configured defaults. It should be evaluated as policy behavior.
 
-This branch is the foundation, not the final product. The immediate milestones
-covered here are:
+The `omega-*` commands are experimental. Numeric-field eligibility checks do
+not establish source independence, calibrated confidence, or suitable
+biological rules. Topology-only `omega-path` payloads report a PLN skip.
+The synthetic `omega-probe` checks a different case: predefined truth values.
 
-1. schema capability registry;
-2. MORK evidence packet extraction;
-3. exact-edge source/provenance audit;
-4. bounded packet-local assessment over extracted evidence;
-5. JSON/CSV exports for downstream analysis;
-6. entity-level schema coverage audit;
-7. schema-path tracing and path audit;
-8. conservative OmegaClaw payload generation;
-9. evaluation of where symbolic reasoning did and did not add value.
+## Scale And Reproducibility
+
+- Retrieval and path enumeration have explicit bounds; inspect truncation and retrieval metadata.
+- Native MORK cursor pagination is not implemented.
+- A retrieval cap should not be assumed to bound every upstream export or response in memory.
+- Exports reflect the requested endpoint, schema, namespace, policy, and limits.
+- Changing a schema alone does not load data or validate a larger deployment.
+- Local tests use fixtures/fake clients. Live MORK and OmegaClaw checks require their respective services.
+
+## Repository Guide
+
+```text
+bioclaw_symbolic/   Python implementation and CLI
+config/            Property-role and assessment policies
+examples/          Small schema and request examples
+tests/             Offline regression tests
+docs/commands.md   CLI walkthrough and troubleshooting
+docs/evaluation.md Evaluator reading order and acceptance checks
+docs/irc-demo.md   Historical IRC evidence from main
+docs/images/       Original demo screenshots
+```
+
+The earlier [evaluation write-up](docs/bioclaw_omegaclaw_evaluation.md) is kept
+as an experiment record. Future semantic-parser orchestration and persistent
+project workflows remain proposals outside this branch's implemented scope.
